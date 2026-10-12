@@ -1,0 +1,32 @@
+# Python / JavaScript
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+node_modules/
+coverage/
+
+# Local credentials, references, downloads and runtime artifacts
+.env
+.env.*
+!.env.example
+.state/
+state/
+models/
+third_party/
+*.token
+*.wav
+*.mp3
+*.pcm
+*.gguf
+*.safetensors
+*.onnx
+screenshots/
+test-results/
+playwright-report/
+*.log
+.DS_Store
+Thumbs.db

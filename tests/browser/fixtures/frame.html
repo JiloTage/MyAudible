@@ -1,0 +1,13 @@
+<!doctype html><html><meta charset="utf-8"><style>html,body{margin:0}canvas{display:block}</style>
+<canvas width="160" height="65"></canvas>
+<script>
+const ctx = document.querySelector('canvas').getContext('2d');
+let number = 0;
+function draw() {
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, 160, 65);
+  ctx.fillStyle = '#222'; ctx.font = '18px sans-serif';
+  ctx.fillText(number ? '物語の続き' : '物語の始まり', 5, 36);
+}
+addEventListener('message', e => { if (e.data?.type === 'redraw') { number++; draw(); } });
+draw();
+</script></html>

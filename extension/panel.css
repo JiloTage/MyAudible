@@ -1,0 +1,21 @@
+:root { color-scheme: light dark; font: 14px/1.5 system-ui, sans-serif; }
+* { box-sizing: border-box; }
+body { margin: 0; padding: 12px; }
+header { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; border-bottom: 2px solid #888; padding-bottom: 8px; }
+h1 { font-size: 19px; margin: 0; }
+h2 { font-size: 15px; margin: 0 0 8px; }
+section, main > details { border-bottom: 1px solid #888; padding: 12px 0; }
+label { display: block; margin: 7px 0; }
+input, select, textarea { font: inherit; display: block; width: 100%; padding: 6px; border: 1px solid #888; border-radius: 2px; }
+button { font: inherit; padding: 6px 9px; border: 1px solid #888; border-radius: 2px; cursor: pointer; margin: 4px 0; }
+button:disabled { cursor: default; opacity: 0.55; }
+.buttons { display: flex; flex-wrap: wrap; gap: 5px; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; }
+.note { font-size: 12px; opacity: 0.78; margin: 7px 0; }
+#health { font-size: 12px; text-align: right; }
+#status { white-space: pre-wrap; overflow-wrap: anywhere; }
+#target { font-size: 12px; overflow-wrap: anywhere; }
+summary { cursor: pointer; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; font: inherit; }
+canvas { width: 100%; display: block; border: 1px solid #888; touch-action: none; cursor: crosshair; margin-top: 8px; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); }

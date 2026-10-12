@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="ja">
+<meta charset="utf-8">
+<title>Same URL reader fixture</title>
+<style>
+  html, body { margin: 0; background: #d9d9d9; font-family: sans-serif; }
+  main { width: 1000px; margin: 12px auto; position: relative; }
+  #book { display: block; background: white; width: 1000px; height: 700px; }
+  #picture { position: absolute; width: 100px; height: 70px; top: 575px; left: 850px; }
+  iframe { position: absolute; width: 160px; height: 65px; border: 0; top: 575px; left: 40px; }
+  nav { margin: 10px 0; display: flex; gap: 10px; }
+  button { padding: 10px 24px; }
+</style>
+<main>
+  <canvas id="book" width="1000" height="700" aria-label="読書ページ"></canvas>
+  <img id="picture" alt="挿絵" src="picture.svg">
+  <iframe src="frame.html" title="reader frame"></iframe>
+  <nav><button id="previous">前のページ</button><button id="next">次のページ</button></nav>
+</main>
+<script>
+  const canvas = document.querySelector('#book');
+  const ctx = canvas.getContext('2d');
+  const sentence = '遠くの山から、静かな風が吹いてきました。';
+  let pageNumber = 1;
+  let animation = 0;
+  let mutations = 0;
+  const observer = new MutationObserver(records => mutations += records.length);
+  observer.observe(document.querySelector('main'), {subtree: true, childList: true, attributes: true, characterData: true});
+  function draw(number, offset = 0) {
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, 1000, 700);
+    ctx.save(); ctx.translate(offset, 0);
+    ctx.fillStyle = '#111'; ctx.font = '26px sans-serif';
+    for (let row = 0; row < 15; row++) {
+      ctx.fillText(sentence, 64, 76 + row * 30);
+    }
+    // Only this single glyph changes between pages one and two. The URL and DOM stay the same.
+    ctx.fillText(number % 2 ? '五' : '六', 734, 496);
+    ctx.restore();
+  }
+  function goTo(number, animate = false) {
+    cancelAnimationFrame(animation);
+    pageNumber = number;
+    if (!animate) { draw(number); return; }
+    const start = performance.now();
+    function frame(now) {
+      const elapsed = now - start;
+      draw(number, elapsed < 650 ? Math.round(Math.sin(elapsed / 55) * 28 * (1 - elapsed / 650)) : 0);
+      if (elapsed < 650) animation = requestAnimationFrame(frame);
+    }
+    animation = requestAnimationFrame(frame);
+  }
+  document.querySelector('#next').addEventListener('click', () => goTo(pageNumber + 1, true));
+  document.querySelector('#previous').addEventListener('click', () => goTo(Math.max(1, pageNumber - 1), true));
+  canvas.addEventListener('click', event => goTo(pageNumber + (event.offsetX > 500 ? 1 : -1), true));
+  let touchX = 0;
+  canvas.addEventListener('touchstart', event => touchX = event.changedTouches[0].clientX, {passive: true});
+  canvas.addEventListener('touchend', event => {
+    const distance = event.changedTouches[0].clientX - touchX;
+    if (Math.abs(distance) > 20) goTo(pageNumber + (distance < 0 ? 1 : -1), true);
+  }, {passive: true});
+  window.addEventListener('keydown', event => {
+    if (event.key === 'ArrowRight') goTo(pageNumber + 1, true);
+    if (event.key === 'ArrowLeft') goTo(Math.max(1, pageNumber - 1), true);
+  });
+  window.readerFixture = {
+    goTo,
+    page: () => pageNumber,
+    mutations: () => mutations,
+    iframeChange: () => document.querySelector('iframe').contentWindow.postMessage({type: 'redraw'}, '*'),
+    imageChange: () => document.querySelector('#picture').animate(
+      [{transform: 'translateX(0)'}, {transform: 'translateX(-105px)'}],
+      {duration: 550, fill: 'forwards', easing: 'ease-out'}),
+  };
+  draw(1);
+</script>
+</html>
