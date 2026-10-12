@@ -6,7 +6,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from myaudible.app import create_app
+from myaudible.app import Options, create_app
 from myaudible.config import Settings
 from myaudible.voices import MAX_REFERENCE_BYTES
 from test_speech import recording, success_response
@@ -14,6 +14,15 @@ from test_speech import recording, success_response
 
 TOKEN = "test-token-with-at-least-32-characters"
 ORIGIN = "chrome-extension://" + "a" * 32
+
+
+def test_speed_accepts_cpp_range_and_rejects_invalid_values():
+    assert Options().speed == 1
+    for value in (0.25, 1, 1.5, 4):
+        assert Options(speed=value).speed == value
+    for value in (0.24, 4.01, float('nan'), float('inf'), True, '1.5'):
+        with pytest.raises(ValueError):
+            Options(speed=value)
 
 
 class FakeOCR:
@@ -114,6 +123,58 @@ def test_ws_auth_unicode_and_untrusted_origin(tmp_path):
         with pytest.raises(Exception):
             with client.websocket_connect("ws://127.0.0.1/v1/realtime", headers={"Origin": "https://evil.example"}):
                 pass
+
+
+@pytest.mark.parametrize("input_type", ["text", "image"])
+def test_whitespace_is_removed_for_tts_but_kept_in_transcript(tmp_path, input_type):
+    import json
+    text = "こん にちは。\n世界　へ。"
+    requests = []
+
+    class WhitespaceOCR(FakeOCR):
+        def recognize(self, image, reading_order):
+            return text
+
+    def upstream(request):
+        requests.append(json.loads(request.content))
+        return success_response()
+
+    app = make_app(tmp_path, handler=upstream, ocr=WhitespaceOCR())
+    input_data = {"type": "text", "text": text} if input_type == "text" else {
+        "type": "image", "mime_type": "image/png",
+        "data_base64": base64.b64encode(b"fake screenshot").decode(),
+    }
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        with client.websocket_connect("ws://127.0.0.1/v1/realtime") as ws:
+            authenticate(ws)
+            ws.send_json({"type": "synthesize", "id": "whitespace", "input": input_data, "options": {"speed": 1.5}})
+            events = until_completed(ws, "whitespace")
+            assert events[-1]["type"] == "completed"
+            assert next(e["text"] for e in events if e["type"] == "transcript") == text
+    assert len(requests) == 1
+    assert requests[0]["input"] == "こんにちは。世界へ。"
+    assert requests[0]["speed"] == 1.5
+
+
+def test_old_panel_chunk_setting_is_ignored_and_full_text_is_forwarded(tmp_path):
+    import json
+    requests = []
+
+    def upstream(request):
+        requests.append(json.loads(request.content))
+        return success_response()
+
+    app = make_app(tmp_path, handler=upstream)
+    text = "古いパネルから送った文章も全文を一度に渡します。\n" * 10
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        with client.websocket_connect("ws://127.0.0.1/v1/realtime") as ws:
+            authenticate(ws)
+            ws.send_json({"type": "synthesize", "id": "legacy", "input": {"type": "text", "text": text}, "options": {"chunk_chars": 20}})
+            assert until_completed(ws, "legacy")[-1]["type"] == "completed"
+    assert len(requests) == 1
+    assert requests[0]["input"] == text.replace("\n", "")
+    assert "chunk_chars" not in requests[0]
+    assert requests[0]["speed"] == 1
 
 
 def test_latest_cancel_waits_for_blocking_ocr_before_reusing_gpu(tmp_path):

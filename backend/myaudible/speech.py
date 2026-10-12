@@ -4,13 +4,14 @@ import asyncio
 import base64
 import binascii
 import json
-import re
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 
 import httpx
 
 from .voices import VoiceStore
+
+MAX_BUFFERED_AUDIO_BYTES = 64 * 1024 * 1024
 
 
 class SpeechError(RuntimeError):
@@ -19,31 +20,6 @@ class SpeechError(RuntimeError):
         self.code = code
         self.missing_voice = missing_voice
         self.duplicate_voice = duplicate_voice
-
-
-def split_text(text: str, limit: int = 100) -> list[str]:
-    """Keep natural sentence boundaries while bounding each inference request."""
-    parts = re.split(r"(?<=[。！？!?\n])", text)
-    chunks: list[str] = []
-    pending = ""
-    for part in parts:
-        if not part:
-            continue
-        if pending and len(pending) + len(part) > limit:
-            if pending.strip():
-                chunks.append(pending.strip())
-            pending = ""
-        while len(part) > limit:
-            cut = max(part.rfind(mark, 0, limit) for mark in ("、", "，", ",", " ", "\t")) + 1
-            if cut < limit // 2:
-                cut = limit
-            if part[:cut].strip():
-                chunks.append(part[:cut].strip())
-            part = part[cut:]
-        pending += part
-    if pending.strip():
-        chunks.append(pending.strip())
-    return chunks
 
 
 async def sse_events(response: httpx.Response) -> AsyncIterator[dict]:
@@ -136,10 +112,43 @@ class SpeechService:
     def forget_voice(self, voice_id: str) -> None:
         self._registered.discard(voice_id)
 
-    async def _stream_chunk(self, text: str, options: dict) -> AsyncIterator[tuple[bytes, int]]:
+    async def _stream_audio(self, text: str, options: dict) -> AsyncIterator[tuple[bytes, int]]:
+        # Playback ACKs must not stall speech.cpp's HTTP sender and its write timeout.
+        queue = asyncio.Queue()
+        queued_bytes = 0
+
+        async def receive():
+            nonlocal queued_bytes
+            try:
+                async with aclosing(self._receive_audio(text, options)) as stream:
+                    async for audio, rate in stream:
+                        queued_bytes += len(audio)
+                        if queued_bytes > MAX_BUFFERED_AUDIO_BYTES:
+                            raise SpeechError("生成音声がメモリ上限を超えました。読み取り範囲を小さくするか、短いテキストで再実行してください。", "audio_too_large")
+                        queue.put_nowait((audio, rate))
+            except Exception as exc:
+                queue.put_nowait(exc)
+            finally:
+                queue.put_nowait(None)
+
+        receiver = asyncio.create_task(receive())
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                if isinstance(item, Exception):
+                    raise item
+                queued_bytes -= len(item[0])
+                yield item
+        finally:
+            receiver.cancel()
+            await asyncio.gather(receiver, return_exceptions=True)
+
+    async def _receive_audio(self, text: str, options: dict) -> AsyncIterator[tuple[bytes, int]]:
         body = {
             "input": text, "voice": options.get("voice_id") or "none", "response_format": "pcm",
-            "stream_format": "sse", "steps": options.get("steps", 4), "speed": 1,
+            "stream_format": "sse", "steps": options.get("steps", 4), "speed": options.get("speed", 1.0),
         }
         for key in ("seed", "instructions"):
             if options.get(key) is not None:
@@ -182,21 +191,23 @@ class SpeechService:
             raise SpeechError("Local speech.cpp disconnected or timed out", "tts_unavailable") from exc
 
     async def synthesize(self, text: str, options: dict) -> AsyncIterator[tuple[bytes, int]]:
+        text = "".join(text.split())
+        if not text:
+            raise SpeechError("読み上げるテキストがありません", "empty_text")
         voice_id = options.get("voice_id")
         if voice_id:
             await self.register_voice(voice_id)
-        for chunk in split_text(text, options.get("chunk_chars", 100)):
-            emitted = False
-            try:
-                async with aclosing(self._stream_chunk(chunk, options)) as stream:
-                    async for audio, rate in stream:
-                        emitted = True
-                        yield audio, rate
-            except SpeechError as exc:
-                if not voice_id or not exc.missing_voice or emitted:
-                    raise
-                # speech.cpp keeps voices in memory. Its restart invalidates our cache.
-                await self.register_voice(voice_id, force=True)
-                async with aclosing(self._stream_chunk(chunk, options)) as stream:
-                    async for audio, rate in stream:
-                        yield audio, rate
+        emitted = False
+        try:
+            async with aclosing(self._stream_audio(text, options)) as stream:
+                async for audio, rate in stream:
+                    emitted = True
+                    yield audio, rate
+        except SpeechError as exc:
+            if not voice_id or not exc.missing_voice or emitted:
+                raise
+            # speech.cpp keeps voices in memory. Its restart invalidates our cache.
+            await self.register_voice(voice_id, force=True)
+            async with aclosing(self._stream_audio(text, options)) as stream:
+                async for audio, rate in stream:
+                    yield audio, rate

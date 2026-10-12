@@ -7,13 +7,19 @@ Backend: FastAPI, bound to `127.0.0.1:8765`, all data remains on user's PC.
 WebSocket `/v1/realtime`: first frame `{type:"auth", token}`. Backend emits `{type:"ready", flow_control:"audio.ack"}` or error and closes. Requests:
 
 ```json
-{"type":"synthesize", "id":"uuid", "input":{"type":"text","text":"こんにちは。"}, "options":{"voice_id":null,"steps":4,"instructions":"落ち着いた声", "seed":42,"chunk_chars":120}}
+{"type":"synthesize", "id":"uuid", "input":{"type":"text","text":"こんにちは。"}, "options":{"voice_id":null,"steps":4,"speed":1.5,"instructions":"落ち着いた声", "seed":42}}
 ```
 
 Image input instead: `{type:"image", data_base64:"...", mime_type:"image/png", reading_order:"vertical"}`. `reading_order` can be `auto`, `vertical`, `horizontal`.
 Cancel: `{type:"cancel", id}`. New requests cancel previous job, latest wins.
 
 Flow control: after scheduling each `audio.chunk`, send `{type:"audio.ack", id, index}`. The server holds at most one unacknowledged chunk and stops with an error after 60 seconds without an acknowledgement. The browser limits queued playback to about 20 seconds and waits for playback progress before acknowledging further chunks. Cancel and replacement requests interrupt this wait immediately; acknowledgements for stale requests are ignored.
+
+Before TTS, the backend removes all Unicode whitespace from both OCR and direct text input, including newlines, tabs, ASCII/full-width spaces and non-breaking spaces. Punctuation is retained; English word spaces are removed too. The `transcript` event retains internal whitespace for inspection. Input that becomes empty is rejected with `empty_text` before contacting speech.cpp.
+
+The backend submits the cleaned full text in one HTTP request. speech.cpp handles sentence splitting and reuses the same voice, options and seed within that request. The obsolete `chunk_chars` option is accepted from older installed panels but ignored and not forwarded.
+
+The backend reads speech.cpp's SSE response independently of playback acknowledgements, buffering at most 64 MiB of pending PCM for the request. This avoids speech.cpp's HTTP write timeout while the browser waits for playback. The larger bound allows a full page to be received in one response. Cancellation closes the upstream response and discards pending audio. Excess pending audio returns `audio_too_large`; select a smaller reading area or submit less text.
 
 Server JSON events all carry request `id` except ready/auth error:
 - `{type:"status", id, stage:"ocr"|"tts", message}`
@@ -23,4 +29,4 @@ Server JSON events all carry request `id` except ready/auth error:
 - `{type:"cancelled", id}`
 - `{type:"error", id, message, code}`
 
-Audio is streamed to browser and held only while playback. Playback speed is a browser parameter (`0.5`–`2`), independent of synthesis. No screenshot/text/generated audio persistence or content logging. Reference voices are deliberately persistent and removable. Token stored Chrome local storage, never in URL or source control. Upstream speech.cpp details are in upstream-notes.md.
+Audio is streamed to browser and held only while playback. `options.speed` is passed to speech.cpp as the synthesis speed (`0.25`–`4`, default `1`); the panel offers `0.5`–`2`. The browser plays the returned audio at its normal rate without applying a second speed change. Changing the setting affects the next synthesis request; queued audio retains its generated speed. No screenshot/text/generated audio persistence or content logging. Reference voices are deliberately persistent and removable. Token stored Chrome local storage, never in URL or source control. Upstream speech.cpp details are in upstream-notes.md.

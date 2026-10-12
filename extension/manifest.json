@@ -1,15 +1,15 @@
 {
   "manifest_version": 3,
   "name": "MyAudible",
-  "version": "0.1.0",
+  "version": "0.1.3",
   "description": "画面のOCRとローカル音声合成をサイドパネルから実行します。",
   "minimum_chrome_version": "116",
-  "permissions": ["activeTab", "scripting", "sidePanel", "storage"],
-  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
+  "permissions": ["activeTab", "scripting", "sidePanel", "storage", "nativeMessaging"],
+  "host_permissions": ["<all_urls>"],
   "background": {"service_worker": "service-worker.js", "type": "module"},
   "action": {"default_title": "MyAudibleを開く"},
   "side_panel": {"default_path": "panel.html"},
   "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'none'; connect-src http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*"
+    "extension_pages": "script-src 'self'; object-src 'none'; connect-src data: http://127.0.0.1:* http://localhost:* ws://127.0.0.1:* ws://localhost:*"
   }
 }

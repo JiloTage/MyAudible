@@ -47,6 +47,14 @@ test('capture refuses another active tab before exposing any image', async () =>
   assert.equal(captures, 0);
 });
 
+test('capture permission failure explains how to grant access', async () => {
+  await assert.rejects(captureLockedTab({
+    tabId: 1, windowId: 2, queryActive: async () => ({id: 1, windowId: 2}),
+    capture: async () => { throw new Error("Either the '<all_urls>' or 'activeTab' permission is required."); },
+    revision: () => 0
+  }), /再読み込み.*サイトへのアクセス/);
+});
+
 test('capture discards tab switch, switch-return, and window switch races', async () => {
   for (const race of ['tab', 'return', 'window']) {
     let revision = 0, calls = 0;

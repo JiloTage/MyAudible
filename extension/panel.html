@@ -11,6 +11,8 @@
   <main>
     <details open>
       <summary>ローカル接続</summary>
+      <button id="startServer" type="button">サーバーを起動して接続</button>
+      <p class="note">Windowsでは初回だけ起動用ランチャーの登録が必要です。起動後はトークンも自動設定します。</p>
       <label>接続先<input id="backend" type="url" value="http://127.0.0.1:8765" spellcheck="false"></label>
       <label>トークン<input id="token" type="password" autocomplete="off" placeholder="起動したバックエンドのトークン"></label>
       <button id="connect" type="button">接続・参照音声を更新</button>
@@ -26,6 +28,7 @@
         <button id="stop" type="button">停止</button>
       </div>
       <p class="note">対象タブを前面にしたまま使用します。自動読み上げは約1.2秒ごとに画面を確認し、ページが静止してから読みます。</p>
+      <p class="note">画面の読み取りにはサイトへのアクセス許可が必要です。権限エラーが出る場合はChromeの拡張機能管理からMyAudibleを再読み込みしてください。</p>
       <details>
         <summary>読み取り範囲・ページ検出</summary>
         <button id="preview" type="button">画面を表示して範囲を選ぶ</button>
@@ -66,10 +69,10 @@
       </details>
       <div class="grid">
         <label>生成ステップ<input id="steps" type="number" min="1" max="100" value="4"></label>
-        <label>分割文字数<input id="chunkChars" type="number" min="20" max="300" value="120"></label>
         <label>シード（任意）<input id="seed" type="number" min="0" max="2147483647" placeholder="ランダム"></label>
-        <label>再生速度<select id="rate"><option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option></select></label>
+        <label>読み上げ速度<select id="rate"><option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option></select></label>
       </div>
+      <p class="note">速度の変更は次の読み上げから反映されます。</p>
       <label>話し方の指示（任意）<input id="instructions" type="text" maxlength="500" placeholder="落ち着いた声で読んでください"></label>
     </section>
 

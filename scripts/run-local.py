@@ -29,8 +29,11 @@ def require_free_port(port: int) -> None:
             raise RuntimeError(f"127.0.0.1:{port} is already in use; stop that server or choose another port.") from error
 
 
-def launch(arguments: list[str], *, environment: dict[str, str] | None = None) -> subprocess.Popen:
+def launch(arguments: list[str], *, environment: dict[str, str] | None = None, quiet: bool = False) -> subprocess.Popen:
     options = {"env": environment}
+    if quiet:
+        # Native startup logs must never contain OCR inputs or generated audio.
+        options.update(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if os.name == "nt":
         options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:
@@ -85,6 +88,7 @@ def main() -> int:
     parser.add_argument("--ocr-device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--speech-port", type=port_number, default=8081)
     parser.add_argument("--backend-port", type=port_number, default=8765)
+    parser.add_argument("--quiet", action="store_true", help="Suppress child output for background startup")
     args = parser.parse_args()
     speech_child = backend_child = None
     try:
@@ -113,9 +117,9 @@ def main() -> int:
         environment["MYAUDIBLE_PORT"] = str(args.backend_port)
         print(f"Starting {version}; {args.model}, device {args.speech_device}.", flush=True)
         print("The first GPU run can take a while to compile shaders. Press Ctrl+C to stop both servers.", flush=True)
-        speech_child = launch([args.speech, "serve", args.model, "--host", "127.0.0.1", "--port", str(args.speech_port), "--device", args.speech_device])
+        speech_child = launch([args.speech, "serve", args.model, "--host", "127.0.0.1", "--port", str(args.speech_port), "--device", args.speech_device], quiet=args.quiet)
         wait_for_speech(speech_child, environment["MYAUDIBLE_SPEECH_URL"])
-        backend_child = launch([sys.executable, "-m", "myaudible"], environment=environment)
+        backend_child = launch([sys.executable, "-m", "myaudible"], environment=environment, quiet=args.quiet)
         print(f"MyAudible backend starting at http://127.0.0.1:{args.backend_port}; use the connection token printed below.", flush=True)
         while True:
             if speech_child.poll() is not None:

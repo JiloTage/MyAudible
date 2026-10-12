@@ -68,7 +68,7 @@ data: {"type":"speech.audio.done","seed":123,"samples":134400,"stop":"complete"}
 
 `response_format: "wav"` は全生成終了後にファイルを返す。`mp3`/`opus`/`aac`/`flac` は未対応。リアルタイム再生には `pcm` を使う。上流の `/v1/realtime` WebSocket は **音声認識のみ**で、TTS 会話セッションではない。MyAudible が Chrome へ提供する WebSocket は OCR、進捗、TTS PCM をつなぐ独自プロトコル。
 
-MF は文全体の潜在音声を生成した後に、まず約 0.48 秒、続いて複数の窓で PCM をデコードする。トークン単位で即時発声するモデルではない。上流サーバーは長文を文単位に分割し、必要なら読点や空白でも分割する。1 回のモデル推論は最大 30 秒、256 text tokens。MF は 100 文字前後・18～20 秒以上の長い文で発音が乱れる場合があるため、MyAudible 側でも短い文・読点で分割する。
+MF は文全体の潜在音声を生成した後に、まず約 0.48 秒、続いて複数の窓で PCM をデコードする。トークン単位で即時発声するモデルではない。MyAudibleは全文を1回のHTTPリクエストで上流へ渡す。speech.cppが文単位に分割し、同じvoice・options・seedを引き継ぐ。モデルの長さ制限を超えた文は読点や空白でさらに分割する。アプリ側の文字数分割は行わない。1回のモデル推論は最大30秒・256 text tokensであり、全文のHTTPリクエストを30秒に制限する意味ではない。MFは100文字前後・18～20秒以上の長い文で発音が乱れる場合があること、`voice: none`では内部の分割ごとにも声が変わり得ることは、[上流のモデル説明](https://github.com/nyosegawa/speech.cpp/blob/v0.8.4/docs/models/irodori-tts.md#long-sentences) に記載されている。
 
 ### 参照音声の登録
 

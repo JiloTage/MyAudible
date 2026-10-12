@@ -6,7 +6,6 @@ export class AudioPlayer {
     this.onState = onState;
     this.context = null;
     this.sources = new Set();
-    this.rate = 1;
     this.nextAt = 0;
     this.generation = 0;
     this.decodeQueue = Promise.resolve();
@@ -18,10 +17,6 @@ export class AudioPlayer {
     this.context ||= this.contextFactory();
     await this.context.resume();
     if (this.context.state !== 'running') throw new Error('音声を有効にするには「今の画面を読む」または「自動読み上げ」を押してください。');
-  }
-  setRate(value) {
-    this.rate = value;
-    // Current sources keep their rate so the queued schedule stays contiguous.
   }
   stop() {
     this.generation++;
@@ -77,14 +72,13 @@ export class AudioPlayer {
         const bytes = Uint8Array.from(atob(event.data_base64), char => char.charCodeAt(0));
         buffer = await this.context.decodeAudioData(bytes.buffer);
       } else throw new Error('非対応の音声形式です。');
-      if (buffer.duration > 30) throw new Error('音声チャンクが長すぎます。分割文字数を下げて再実行してください。');
+      if (buffer.duration > 30) throw new Error('音声チャンクが長すぎます。停止して、短いテキストで再実行してください。');
       if (!await this.waitForCapacity(generation)) return false;
       const source = this.context.createBufferSource();
       source.buffer = buffer;
-      source.playbackRate.value = this.rate;
       source.connect(this.context.destination);
       const when = Math.max(this.context.currentTime + 0.035, this.nextAt);
-      this.nextAt = when + buffer.duration / this.rate;
+      this.nextAt = when + buffer.duration;
       this.sources.add(source);
       source.onended = () => {
         this.sources.delete(source);

@@ -65,4 +65,5 @@ Invoke-Checked $speechExecutable @('--version')
 Invoke-Checked $speechExecutable @('devices')
 Write-Host "Downloading the pinned $Model model (about 1.92 GB for the default F16 model)."
 Invoke-Checked $speechExecutable @('pull', $Model)
-Write-Host 'Setup complete. Start MyAudible with scripts\run-windows.ps1.'
+& (Join-Path $PSScriptRoot 'install-native-host.ps1') -Model $Model
+Write-Host 'Setup complete. Reload the extension and start MyAudible from its side panel, or use scripts\run-windows.ps1.'

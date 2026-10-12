@@ -36,7 +36,14 @@ export async function captureLockedTab({tabId, windowId, queryActive, capture, r
   if (!before || before.id !== tabId || before.windowId !== windowId) {
     throw new CaptureSafetyError('対象タブが前面ではありません。');
   }
-  const dataURL = await capture(windowId);
+  let dataURL;
+  try { dataURL = await capture(windowId); }
+  catch (error) {
+    if (/activeTab|<all_urls>/.test(error.message || '')) {
+      throw new Error('画面の取得が許可されていません。chrome://extensionsでMyAudibleを再読み込みし、サイトへのアクセスを許可してください。');
+    }
+    throw error;
+  }
   const after = await queryActive(windowId);
   if (!after || after.id !== tabId || after.windowId !== windowId || revision() !== startRevision) {
     throw new CaptureSafetyError('キャプチャ中にタブが切り替わりました。');

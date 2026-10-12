@@ -42,8 +42,10 @@ class Options(BaseModel):
     model_config = ConfigDict(extra="forbid")
     voice_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
     steps: int = Field(default=4, ge=1, le=100, strict=True)
+    speed: float = Field(default=1.0, ge=0.25, le=4, strict=True)
     seed: int | None = Field(default=None, ge=0, le=2147483647, strict=True)
-    chunk_chars: int = Field(default=100, ge=20, le=300, strict=True)
+    # Accept the setting from older panels; speech.cpp owns text splitting.
+    chunk_chars: int | None = Field(default=None, ge=20, le=300, strict=True, exclude=True)
     instructions: str | None = Field(default=None, max_length=1000)
 
 

@@ -1,4 +1,4 @@
-// Opening through the extension action grants activeTab for that tab.
+// Open the side panel from the extension's toolbar icon.
 chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel.setPanelBehavior({openPanelOnActionClick: true}).catch(console.error);
 });

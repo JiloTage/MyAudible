@@ -274,7 +274,7 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first["input"]["type"], "image")
         self.assertTrue(base64.b64decode(first["input"]["data_base64"]).startswith(b"\x89PNG"))
         auth = await panel.evaluate("__backend.frames[0]")
-        self.assertEqual(auth, {"type": "auth", "token": "TEST-LOCAL-TOKEN"})
+        self.assertEqual(auth, {"type": "auth", "token": "TEST-LOCAL-TOKEN-WITH-32-CHARACTERS"})
         self.assertEqual(await panel.evaluate("__backend.sockets[0].url"), "ws://127.0.0.1:8765/v1/realtime")
         await panel.evaluate("""id => {
             __backend.emit(id, 'transcript', {text: '読み取り結果です。'});
@@ -348,12 +348,57 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("一時停止", await panel.locator("#status").text_content())
         await panel.locator("#stop").click()
 
+    async def test_native_start_connects_and_ignores_duplicate_clicks(self):
+        panel = await self.open_panel()
+        await panel.locator("#token").fill("old-token")
+        await panel.evaluate("__mock.nativePending = true")
+        await panel.locator("#startServer").click()
+        await panel.wait_for_function("__mock.nativeCalls.length === 1")
+        self.assertTrue(await panel.locator("#startServer").is_disabled())
+        await panel.locator("#startServer").evaluate("element => element.dispatchEvent(new Event('click'))")
+        self.assertEqual(await panel.evaluate("__mock.nativeCalls.length"), 1)
+        await panel.evaluate("__mock.resolveNative()")
+        await panel.wait_for_function("document.querySelector('#status').textContent.includes('起動して接続しました')")
+        self.assertFalse(await panel.locator("#startServer").is_disabled())
+        self.assertEqual(await panel.locator("#token").input_value(), "TEST-LOCAL-TOKEN-WITH-32-CHARACTERS")
+        self.assertEqual(await panel.evaluate("__mock.nativeCalls"), [{"host": "com.myaudible.launcher", "message": {"type": "start"}}])
+        saved = json.loads(await panel.evaluate("sessionStorage.getItem('test.chrome.storage')"))
+        self.assertEqual(saved["token"], "TEST-LOCAL-TOKEN-WITH-32-CHARACTERS")
+        await panel.locator("#textInput").fill("起動後の読み上げ")
+        await panel.locator("#sendText").click()
+        self.assertEqual((await self.request(panel))["input"]["text"], "起動後の読み上げ")
+
+    async def test_native_start_failure_allows_retry_and_reuses_running_server(self):
+        panel = await self.open_panel()
+        await panel.evaluate("__mock.nativeError = 'Specified native messaging host not found.'")
+        await panel.locator("#startServer").click()
+        await panel.wait_for_function("document.querySelector('#status').textContent.includes('install-native-host.ps1')")
+        self.assertFalse(await panel.locator("#startServer").is_disabled())
+        await panel.evaluate("__mock.nativeError = null; __mock.nativeResponse = {ok: false, error: '8765は使用中です。'}")
+        await panel.locator("#startServer").click()
+        await panel.wait_for_function("document.querySelector('#status').textContent.includes('8765は使用中')")
+        self.assertFalse(await panel.locator("#startServer").is_disabled())
+        await panel.evaluate("__mock.nativeResponse = {ok: true, url: 'http://127.0.0.1:8765', token: 'TEST-LOCAL-TOKEN-WITH-32-CHARACTERS', already_running: true}")
+        await panel.locator("#startServer").click()
+        await panel.wait_for_function("document.querySelector('#status').textContent.includes('起動済みのサーバー')")
+        self.assertFalse(await panel.locator("#startServer").is_disabled())
+
+    async def test_native_start_rejects_remote_connection_information(self):
+        panel = await self.open_panel()
+        previous = await panel.locator("#token").input_value()
+        await panel.evaluate("__mock.nativeResponse = {ok: true, url: 'https://example.com', token: 'TEST-LOCAL-TOKEN-WITH-32-CHARACTERS'}")
+        await panel.locator("#startServer").click()
+        await panel.wait_for_function("document.querySelector('#status').textContent.includes('接続先は')")
+        self.assertEqual(await panel.locator("#token").input_value(), previous)
+        self.assertFalse(await panel.locator("#startServer").is_disabled())
+
     async def test_panel_text_reference_registration_reload_and_storage_boundaries(self):
         panel = await self.open_panel()
         await panel.locator("#textInput").fill("こんにちは。テキストから読み上げます。")
         await panel.locator("#sendText").click()
         request = await self.request(panel)
         self.assertEqual(request["input"], {"type": "text", "text": "こんにちは。テキストから読み上げます。"})
+        self.assertNotIn("chunk_chars", request["options"])
         self.assertEqual(await panel.evaluate("__mock.captures"), 0)
         await panel.locator("#voiceName").evaluate("element => element.closest('details').open = true")
         await panel.locator("#voiceName").fill("テスト参照音声")
@@ -373,6 +418,23 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("data_base64", stored)
         self.assertNotIn("transcript", json.loads(stored))
         self.assertNotIn("textInput", json.loads(stored))
+
+
+    async def test_speed_is_sent_to_synthesis_and_browser_plays_at_normal_rate(self):
+        panel = await self.open_panel()
+        await panel.locator("#rate").select_option("1.5")
+        await panel.locator("#textInput").fill("速度の確認です。")
+        await panel.locator("#sendText").click()
+        request = await self.request(panel)
+        self.assertEqual(request["options"]["speed"], 1.5)
+        await panel.evaluate("""id => __backend.emit(id, 'audio.chunk', {
+            index: 0, format: 'pcm_s16le', sample_rate: 48000,
+            channels: 1, data_base64: btoa(String.fromCharCode(0).repeat(96000))
+        })""", request["id"])
+        await panel.wait_for_function("__mock.sources.length === 1 && __mock.sources[0].starts === 1")
+        self.assertEqual(await panel.evaluate("__mock.sources[0].playbackRate.value"), 1)
+        await panel.reload()
+        await panel.wait_for_function("document.querySelector('#rate').value === '1.5'")
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ import {backendURL, isCurrentEvent} from './lib/protocol.mjs';
 import {AudioPlayer} from './lib/audio.mjs';
 
 const $ = id => document.getElementById(id);
-const storedKeys = ['backend', 'token', 'voice', 'steps', 'chunkChars', 'seed', 'rate', 'instructions', 'cropX', 'cropY', 'cropWidth', 'cropHeight', 'threshold', 'stableMs', 'readingOrder'];
+const storedKeys = ['backend', 'token', 'voice', 'steps', 'seed', 'rate', 'instructions', 'cropX', 'cropY', 'cropWidth', 'cropHeight', 'threshold', 'stableMs', 'readingOrder'];
 let selectedTab = null;
 let activationRevision = 0;
 let monitoring = false;
@@ -42,6 +42,8 @@ function config() {
   return {base, token};
 }
 function options() {
+  const speed = Number($('rate').value);
+  if (!Number.isFinite(speed) || speed < 0.25 || speed > 4) throw new Error('読み上げ速度は0.25〜4の範囲で指定してください。');
   const bounded = (id, min, max) => {
     const value = Number($(id).value);
     if (!Number.isInteger(value) || value < min || value > max) throw new Error(`${$(id).closest('label').firstChild.textContent.trim()}の範囲が不正です。`);
@@ -50,7 +52,7 @@ function options() {
   return {
     voice_id: $('voice').value || null,
     steps: bounded('steps', 1, 100),
-    chunk_chars: bounded('chunkChars', 20, 300),
+    speed,
     ...($('seed').value.trim() ? {seed: bounded('seed', 0, 2147483647)} : {}),
     ...($('instructions').value.trim() ? {instructions: $('instructions').value.trim()} : {})
   };
@@ -74,7 +76,7 @@ async function checkHealth() {
     $('health').title = result.message || result.tts?.error || result.ocr?.error || '';
   } catch {
     $('health').textContent = 'バックエンド未接続';
-    $('health').title = 'ローカルPCでバックエンドを起動してください。';
+    $('health').title = '「サーバーを起動して接続」を押すか、ローカルPCでバックエンドを起動してください。';
   }
 }
 async function loadVoices(preferred = $('voice').value) {
@@ -82,6 +84,34 @@ async function loadVoices(preferred = $('voice').value) {
   $('voice').replaceChildren(new Option('参照音声なし', ''));
   for (const voice of result.voices || []) $('voice').add(new Option(voice.name, voice.id));
   if ([...$('voice').options].some(item => item.value === preferred)) $('voice').value = preferred;
+}
+async function startServer() {
+  if ($('startServer').disabled) return;
+  $('startServer').disabled = true;
+  $('startServer').textContent = 'サーバーを起動中…';
+  stopMonitor(); disconnectSocket();
+  status('ローカルサーバーを起動しています。初回はモデルの準備に時間がかかる場合があります。');
+  try {
+    let result;
+    try {
+      result = await chrome.runtime.sendNativeMessage('com.myaudible.launcher', {type: 'start'});
+    } catch (error) {
+      throw new Error(`起動用ランチャーに接続できません。PCで scripts\\install-native-host.ps1 を実行してから再試行してください。\n${error.message}`);
+    }
+    if (!result?.ok) throw new Error(result?.error || 'サーバーの起動に失敗しました。');
+    const base = backendURL(result.url);
+    if (typeof result.token !== 'string' || result.token.length < 24) throw new Error('起動用ランチャーからの接続情報が不正です。');
+    if (closed) return;
+    $('backend').value = base;
+    $('token').value = result.token;
+    await saveSettings();
+    await checkHealth();
+    await loadVoices();
+    status(result.already_running ? '起動済みのサーバーに接続しました。' : 'サーバーを起動して接続しました。');
+  } finally {
+    $('startServer').disabled = false;
+    $('startServer').textContent = 'サーバーを起動して接続';
+  }
 }
 
 function disconnectSocket() {
@@ -216,7 +246,7 @@ async function pollPage() {
     if (event.type === 'page') await synthesize(frame.image());
   } catch (error) {
     if (error instanceof CaptureSafetyError) status('対象タブが前面ではないため、自動読み上げを一時停止中。');
-    else { stopMonitor(); cancelCurrent(); status(`画面の取得に失敗: ${error.message}\n対象ページで拡張機能のアイコンを押し、再開してください。`); }
+    else { stopMonitor(); cancelCurrent(); status(`画面の取得に失敗: ${error.message}`); }
   } finally { frame?.release(); pollBusy = false; schedulePoll(); }
 }
 function stopMonitor() {
@@ -317,6 +347,7 @@ $('previewCanvas').addEventListener('pointerup', () => {
 $('previewCanvas').addEventListener('pointercancel', () => { previewDrag = null; });
 
 function run(task) { Promise.resolve().then(task).catch(error => status(error.message || String(error))); }
+$('startServer').addEventListener('click', () => run(startServer));
 $('connect').addEventListener('click', () => run(async () => { stopMonitor(); disconnectSocket(); await saveSettings(); await checkHealth(); await loadVoices(); status('接続しました。'); }));
 $('selectTab').addEventListener('click', () => run(async () => { await selectTab(); status('対象タブを選択しました。'); }));
 $('readOnce').addEventListener('click', () => run(readOnce));
@@ -350,7 +381,6 @@ $('deleteVoice').addEventListener('click', () => run(async () => {
   await loadVoices(); await saveSettings(); status('参照音声を削除しました。');
 }));
 for (const id of storedKeys) $(id).addEventListener('change', () => {
-  if (id === 'rate') player.setRate(Number($('rate').value));
   if (id.startsWith('crop') || id === 'threshold' || id === 'stableMs') { applyCrop(crop()); detector = createDetector(); cancelCurrent(); drawPreview(); }
   if (id === 'token' || id === 'backend') { stopMonitor(); disconnectSocket(); }
   saveSettings().catch(error => status(error.message));
@@ -401,7 +431,7 @@ window.addEventListener('unload', dispose);
 async function initialize() {
   const saved = await chrome.storage.local.get(storedKeys);
   for (const id of storedKeys) if (id !== 'voice' && saved[id] !== undefined) $(id).value = saved[id];
-  applyCrop(crop()); detector = createDetector(); player.setRate(Number($('rate').value));
+  applyCrop(crop()); detector = createDetector();
   await checkHealth();
   if ($('token').value) await loadVoices(saved.voice || '').catch(error => status(error.message));
   healthTimer = setInterval(checkHealth, 15000);

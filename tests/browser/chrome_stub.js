@@ -3,7 +3,7 @@
 (() => {
   const nativeFetch = window.fetch.bind(window);
   const persisted = JSON.parse(sessionStorage.getItem('test.chrome.storage') || '{}');
-  const settings = {token: 'TEST-LOCAL-TOKEN', ...persisted};
+  const settings = {token: 'TEST-LOCAL-TOKEN-WITH-32-CHARACTERS', ...persisted};
   const event = () => ({listeners: new Set(), addListener(fn) { this.listeners.add(fn); },
     removeListener(fn) { this.listeners.delete(fn); }, dispatch(...args) { for (const fn of this.listeners) fn(...args); }});
   window.__mock = {
@@ -11,6 +11,8 @@
     saved: [], captures: 0, fetches: [], executions: [], sources: [], contexts: [],
     voices: JSON.parse(sessionStorage.getItem('test.voices') || '[]'),
     captureRace: null, focusedWindow: 2,
+    nativeCalls: [], nativeError: null, nativePending: false,
+    nativeResponse: {ok: true, url: 'http://127.0.0.1:8765', token: 'TEST-LOCAL-TOKEN-WITH-32-CHARACTERS', already_running: false},
   };
   const events = {activated: event(), updated: event(), removed: event(), message: event(), focused: event()};
   const mock = window.__mock;
@@ -32,7 +34,12 @@
       onActivated: events.activated, onUpdated: events.updated, onRemoved: events.removed,
     },
     scripting: {executeScript: async options => {mock.executions.push(options); return [{result: undefined}];}},
-    runtime: {onMessage: events.message},
+    runtime: {onMessage: events.message, sendNativeMessage: async (host, message) => {
+      mock.nativeCalls.push({host, message});
+      if (mock.nativeError) throw new Error(mock.nativeError);
+      if (mock.nativePending) return new Promise(resolve => {mock.resolveNative = () => resolve(mock.nativeResponse);});
+      return mock.nativeResponse;
+    }},
     windows: {get: async id => ({id, focused: id === mock.focusedWindow}), onFocusChanged: events.focused},
   };
   mock.activate = (id, windowId = 2) => {
@@ -50,7 +57,7 @@
     const respond = (value, status = 200) => Promise.resolve(new Response(JSON.stringify(value),
       {status, headers: {'Content-Type': 'application/json'}}));
     if (path === '/health') return respond({status: 'ok', ocr_ready: true, tts_ready: true});
-    if (init.headers?.Authorization !== 'Bearer TEST-LOCAL-TOKEN') return respond({detail: 'unauthorized'}, 401);
+    if (init.headers?.Authorization !== 'Bearer TEST-LOCAL-TOKEN-WITH-32-CHARACTERS') return respond({detail: 'unauthorized'}, 401);
     if (path === '/v1/voices' && init.method === 'POST') {
       const voice = {id: `voice-${mock.voices.length + 1}`, name: init.body.get('name')};
       mock.voices.push(voice);
@@ -81,7 +88,7 @@
     send(raw) {
       const message = JSON.parse(raw); frames.push(message);
       if (message.type === 'auth') queueMicrotask(() => this.emit(
-        message.token === 'TEST-LOCAL-TOKEN' ? {type: 'ready'} : {type: 'error', message: 'unauthorized'}));
+        message.token === 'TEST-LOCAL-TOKEN-WITH-32-CHARACTERS' ? {type: 'ready'} : {type: 'error', message: 'unauthorized'}));
     }
     emit(message) { this.dispatchEvent(new MessageEvent('message', {data: JSON.stringify(message)})); }
     close() { if (this.readyState === 3) return; this.readyState = 3; this.dispatchEvent(new Event('close')); }
