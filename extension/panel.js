@@ -2,9 +2,10 @@ import {PageTurnDetector, normalizeCrop} from './lib/detector.mjs';
 import {captureLockedTab, CaptureSafetyError, prepareScreenshot} from './lib/capture.mjs';
 import {backendURL, isCurrentEvent} from './lib/protocol.mjs';
 import {AudioPlayer} from './lib/audio.mjs';
+import {readActionOptions, executePageAction} from './lib/page-action.mjs';
 
 const $ = id => document.getElementById(id);
-const storedKeys = ['backend', 'token', 'voice', 'steps', 'seed', 'rate', 'instructions', 'cropX', 'cropY', 'cropWidth', 'cropHeight', 'threshold', 'stableMs', 'readingOrder'];
+const storedKeys = ['backend', 'token', 'voice', 'steps', 'seed', 'rate', 'instructions', 'cropX', 'cropY', 'cropWidth', 'cropHeight', 'threshold', 'stableMs', 'readingOrder', 'afterReadAction', 'afterReadX', 'afterReadY', 'afterReadScrollX', 'afterReadScrollY'];
 let selectedTab = null;
 let activationRevision = 0;
 let monitoring = false;
@@ -15,9 +16,11 @@ let detector = createDetector();
 let socket = null;
 let socketReady = null;
 let currentRequestId = null;
+let autoRead = null;
 let requestRevision = 0;
 let previewBitmap = null;
 let previewDrag = null;
+let previewMode = 'crop';
 let closed = false;
 let healthTimer = null;
 let navigationLoading = false;
@@ -26,6 +29,13 @@ const player = new AudioPlayer({onState: state => {
 }});
 
 function status(message) { $('status').textContent = message; }
+function afterReadOptions() {
+  return readActionOptions({type: $('afterReadAction').value, x: $('afterReadX').value, y: $('afterReadY').value, scrollX: $('afterReadScrollX').value, scrollY: $('afterReadScrollY').value});
+}
+function updateActionFields() {
+  $('afterReadPosition').hidden = $('afterReadAction').value === 'none';
+  $('afterReadScroll').hidden = $('afterReadAction').value !== 'scroll';
+}
 function createDetector() { return new PageTurnDetector({threshold: Math.max(0.1, Number($('threshold')?.value || 0.5)), stableMs: Math.max(500, Math.min(5000, Number($('stableMs')?.value || 600)))}); }
 function crop() { return normalizeCrop({x: Number($('cropX').value) / 100, y: Number($('cropY').value) / 100, width: Number($('cropWidth').value) / 100, height: Number($('cropHeight').value) / 100}); }
 function applyCrop(value) {
@@ -140,15 +150,21 @@ async function ensureSocket() {
       if (message.type === 'status') status(message.message || (message.stage === 'ocr' ? 'OCR処理中…' : '音声生成中…'));
       if (message.type === 'transcript') $('transcript').textContent = message.text;
       if (message.type === 'audio.chunk') {
+        if (autoRead?.id === message.id && message.data_base64) autoRead.hadAudio = true;
         player.enqueue(message).then(accepted => {
           if (accepted && isCurrentEvent(message, currentRequestId) && socket === ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({type: 'audio.ack', id: message.id, index: message.index}));
         }).catch(error => {
           if (isCurrentEvent(message, currentRequestId)) { cancelCurrent(); status(error.message); }
         });
       }
-      if (message.type === 'completed') status(monitoring ? '生成完了。次のページを監視中。' : '生成完了。');
-      if (message.type === 'cancelled') status('読み上げを停止しました。');
-      if (message.type === 'error') { player.stop(); status(message.message || '読み上げに失敗しました。'); }
+      if (message.type === 'completed') {
+        status(autoRead?.id === message.id ? '生成完了。音声の再生完了を待っています。' : monitoring ? '生成完了。次のページを監視中。' : '生成完了。');
+        finishAutoRead(message.id).catch(error => {
+          if (autoRead?.id === message.id) { stopMonitor(); cancelCurrent(); status(error.message); }
+        });
+      }
+      if (message.type === 'cancelled') { autoRead = null; player.stop(); status('読み上げを停止しました。'); }
+      if (message.type === 'error') { autoRead = null; player.stop(); status(message.message || '読み上げに失敗しました。'); }
     });
     ws.addEventListener('error', () => { clearTimeout(timeout); reject(new Error('音声サーバーに接続できません。')); });
     ws.addEventListener('close', () => {
@@ -170,21 +186,49 @@ async function ensureSocket() {
 }
 function cancelCurrent() {
   const id = currentRequestId;
+  autoRead = null;
   currentRequestId = null;
   requestRevision++;
   if (id && socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({type: 'cancel', id}));
   player.stop();
 }
-async function synthesize(input) {
+async function synthesize(input, automatic = false) {
+  const action = automatic ? afterReadOptions() : null;
   cancelCurrent();
   const revision = requestRevision;
   const params = options();
   const ws = await ensureSocket();
   if (revision !== requestRevision || closed) return;
   currentRequestId = crypto.randomUUID();
+  if (action) autoRead = {id: currentRequestId, action, tab: {...selectedTab}, revision: monitoringRevision, activation: activationRevision, hadAudio: false, waiting: false, finished: false};
   $('transcript').textContent = '';
   status(input.type === 'image' ? '画面を送信。OCR処理を開始…' : 'テキストを送信。音声生成を開始…');
   ws.send(JSON.stringify({type: 'synthesize', id: currentRequestId, input, options: params}));
+}
+async function finishAutoRead(id) {
+  const job = autoRead;
+  if (!job || job.id !== id || job.waiting) return;
+  job.waiting = true;
+  if (!job.hadAudio) { stopMonitor(); status('音声が届かなかったため自動操作を停止しました。'); return; }
+  if (await player.waitUntilFinished() && autoRead === job && monitoring && !closed) {
+    job.finished = true;
+    status('再生完了。画面を確認して操作します。');
+    schedulePoll();
+  }
+}
+async function advanceAfterRead(job) {
+  const isCurrent = () => !closed && monitoring && autoRead === job && currentRequestId === job.id && monitoringRevision === job.revision && activationRevision === job.activation;
+  if (!isCurrent()) return;
+  const tab = await activeInWindow(job.tab.windowId);
+  if (!isCurrent() || tab?.id !== job.tab.id) return;
+  try {
+    const performed = await executePageAction({tabId: job.tab.id, documentId: job.tab.documentId, action: job.action, isCurrent});
+    if (!isCurrent()) return;
+    autoRead = null;
+    status(performed ? `${job.action.type === 'click' ? 'クリック' : 'スクロール'}しました。画面の変化を待っています…` : '対象ページが変わったため、操作を取り消しました。');
+  } catch (error) {
+    if (isCurrent()) { stopMonitor(); cancelCurrent(); status(`自動操作に失敗したため停止しました。\n${error.message}`); }
+  }
 }
 
 async function activeInWindow(windowId) {
@@ -207,10 +251,13 @@ async function selectTab() {
 }
 async function injectHints() {
   if (!selectedTab) return;
-  try { await chrome.scripting.executeScript({target: {tabId: selectedTab.id, allFrames: true}, files: ['page-hints.js']}); }
+  const target = selectedTab;
+  let results;
+  try { results = await chrome.scripting.executeScript({target: {tabId: target.id, allFrames: true}, files: ['page-hints.js']}); }
   catch {
-    try { await chrome.scripting.executeScript({target: {tabId: selectedTab.id}, files: ['page-hints.js']}); } catch {}
+    try { results = await chrome.scripting.executeScript({target: {tabId: target.id}, files: ['page-hints.js']}); } catch {}
   }
+  if (selectedTab === target) target.documentId = results?.find(result => result.frameId === 0)?.documentId;
 }
 async function captureFrame() {
   if (!selectedTab) await selectTab();
@@ -243,13 +290,15 @@ async function pollPage() {
     if (!monitoring || generation !== monitoringRevision) return;
     const event = detector.observe(frame.signature, Date.now());
     if (event.type === 'changing') { cancelCurrent(); status('画面の変化を検出。ページの静止を待っています…'); }
-    if (event.type === 'page') await synthesize(frame.image());
+    if (event.type === 'page') await synthesize(frame.image(), true);
+    if (event.type === 'unchanged' && autoRead?.finished) await advanceAfterRead(autoRead);
   } catch (error) {
     if (error instanceof CaptureSafetyError) status('対象タブが前面ではないため、自動読み上げを一時停止中。');
     else { stopMonitor(); cancelCurrent(); status(`画面の取得に失敗: ${error.message}`); }
   } finally { frame?.release(); pollBusy = false; schedulePoll(); }
 }
 function stopMonitor() {
+  autoRead = null;
   monitoring = false;
   monitoringRevision++;
   clearTimeout(monitorTimer); monitorTimer = null;
@@ -258,7 +307,7 @@ function stopMonitor() {
 }
 async function startMonitor() {
   await player.unlock();
-  options(); config();
+  options(); config(); afterReadOptions();
   if (!selectedTab) await selectTab();
   stopMonitor(); cancelCurrent();
   const generation = monitoringRevision;
@@ -303,6 +352,15 @@ function drawPreview() {
   const canvas = $('previewCanvas');
   const ctx = canvas.getContext('2d');
   ctx.drawImage(previewBitmap, 0, 0, canvas.width, canvas.height);
+  if (previewMode === 'action') {
+    const x = canvas.width * Number($('afterReadX').value) / 100, y = canvas.height * Number($('afterReadY').value) / 100;
+    const radius = Math.max(8, canvas.width / 60);
+    ctx.strokeStyle = '#ff3b30'; ctx.lineWidth = Math.max(2, canvas.width / 250);
+    ctx.beginPath(); ctx.arc(x, y, radius, 0, 2 * Math.PI);
+    ctx.moveTo(x - radius * 2, y); ctx.lineTo(x + radius * 2, y);
+    ctx.moveTo(x, y - radius * 2); ctx.lineTo(x, y + radius * 2); ctx.stroke();
+    return;
+  }
   const region = crop();
   const x = region.x * canvas.width, y = region.y * canvas.height;
   const width = region.width * canvas.width, height = region.height * canvas.height;
@@ -314,22 +372,37 @@ function drawPreview() {
   ctx.strokeStyle = '#ff3b30'; ctx.lineWidth = Math.max(2, canvas.width / 250);
   ctx.strokeRect(x, y, width, height);
 }
-async function showPreview() {
+async function showPreview(mode = 'crop') {
   if (!selectedTab) await selectTab();
   const {id: tabId, windowId} = selectedTab;
   const dataURL = await captureLockedTab({tabId, windowId, queryActive: activeInWindow, capture: window => chrome.tabs.captureVisibleTab(window, {format: 'png'}), revision: () => activationRevision});
   clearPreview();
+  previewMode = mode;
   previewBitmap = await createImageBitmap(await (await fetch(dataURL)).blob());
   $('previewCanvas').width = previewBitmap.width;
   $('previewCanvas').height = previewBitmap.height;
   $('previewBox').hidden = false;
+  const help = mode === 'action' ? '操作する位置をクリックしてください。ページ自体は操作しません。' : 'ドラッグして読み取り範囲を選んでください。';
+  $('previewHelp').textContent = help;
+  $('previewCanvas').setAttribute('aria-label', help);
   drawPreview();
+  $('previewBox').scrollIntoView({block: 'nearest'});
 }
 function pointerPosition(event) {
-  const rect = $('previewCanvas').getBoundingClientRect();
-  return {x: Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)), y: Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height))};
+  const canvas = $('previewCanvas'), rect = canvas.getBoundingClientRect();
+  return {x: Math.min(1, Math.max(0, (event.clientX - rect.left - canvas.clientLeft) / canvas.clientWidth)), y: Math.min(1, Math.max(0, (event.clientY - rect.top - canvas.clientTop) / canvas.clientHeight))};
 }
 $('previewCanvas').addEventListener('pointerdown', event => {
+  if (previewMode === 'action') {
+    const point = pointerPosition(event);
+    $('afterReadX').value = (point.x * 100).toFixed(1);
+    $('afterReadY').value = (point.y * 100).toFixed(1);
+    autoRead = null;
+    drawPreview();
+    saveSettings().catch(error => status(error.message));
+    status('操作位置を設定しました。');
+    return;
+  }
   previewDrag = pointerPosition(event);
   $('previewCanvas').setPointerCapture(event.pointerId);
 });
@@ -361,6 +434,7 @@ $('sendText').addEventListener('click', () => run(async () => {
   await synthesize({type: 'text', text});
 }));
 $('preview').addEventListener('click', () => run(showPreview));
+$('pickActionPoint').addEventListener('click', () => run(() => showPreview('action')));
 $('closePreview').addEventListener('click', clearPreview);
 $('uploadVoice').addEventListener('click', () => run(async () => {
   const name = $('voiceName').value.trim();
@@ -381,6 +455,7 @@ $('deleteVoice').addEventListener('click', () => run(async () => {
   await loadVoices(); await saveSettings(); status('参照音声を削除しました。');
 }));
 for (const id of storedKeys) $(id).addEventListener('change', () => {
+  if (id.startsWith('afterRead')) { autoRead = null; updateActionFields(); drawPreview(); }
   if (id.startsWith('crop') || id === 'threshold' || id === 'stableMs') { applyCrop(crop()); detector = createDetector(); cancelCurrent(); drawPreview(); }
   if (id === 'token' || id === 'backend') { stopMonitor(); disconnectSocket(); }
   saveSettings().catch(error => status(error.message));
@@ -432,6 +507,7 @@ async function initialize() {
   const saved = await chrome.storage.local.get(storedKeys);
   for (const id of storedKeys) if (id !== 'voice' && saved[id] !== undefined) $(id).value = saved[id];
   applyCrop(crop()); detector = createDetector();
+  updateActionFields();
   await checkHealth();
   if ($('token').value) await loadVoices(saved.voice || '').catch(error => status(error.message));
   healthTimer = setInterval(checkHealth, 15000);

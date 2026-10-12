@@ -3,8 +3,8 @@
 param(
     [ValidateSet('auto', 'gpu', 'cpu')]
     [string] $SpeechDevice = 'gpu',
-    [ValidateSet('cpu', 'cuda')]
-    [string] $OcrDevice = 'cpu',
+    [ValidateSet('auto', 'cpu', 'cuda')]
+    [string] $OcrDevice = 'auto',
     [ValidateSet('irodori-tts-mf', 'irodori-tts-mf:q8_0', 'irodori-tts', 'irodori-tts:q8_0')]
     [string] $Model = 'irodori-tts-mf',
     [string] $SpeechExecutable = '',

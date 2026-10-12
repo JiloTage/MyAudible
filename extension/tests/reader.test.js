@@ -4,6 +4,7 @@ import {PageTurnDetector, visualDifference, normalizeCrop} from '../lib/detector
 import {captureLockedTab, CaptureSafetyError} from '../lib/capture.mjs';
 import {parsePCM16, isCurrentEvent, backendURL} from '../lib/protocol.mjs';
 import {AudioPlayer} from '../lib/audio.mjs';
+import {readActionOptions, executePageAction} from '../lib/page-action.mjs';
 
 function page(glyphPosition) {
   const pixels = new Uint8Array(160 * 160).fill(255);
@@ -121,4 +122,88 @@ test('cancel releases pending audio credit and prevents a queued stale chunk fro
   assert.equal(player.sources.size, 0);
   await player.close();
   assert.equal(context.state, 'closed');
+});
+
+test('playback completion waits for every source to end', async () => {
+  const context = fakeContext();
+  const player = new AudioPlayer({contextFactory: () => context});
+  await player.unlock();
+  await player.enqueue(audioChunk());
+  await player.enqueue(audioChunk());
+  let finished = false;
+  const waiting = player.waitUntilFinished().then(value => { finished = true; return value; });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(finished, false);
+  context.sources[1].onended();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(finished, false);
+  context.sources[0].onended();
+  assert.equal(await waiting, true);
+  await player.close();
+});
+
+test('stop cancels playback completion and stale ended events cannot finish new audio', async () => {
+  const context = fakeContext();
+  const player = new AudioPlayer({contextFactory: () => context});
+  await player.unlock();
+  await player.enqueue(audioChunk());
+  const old = player.waitUntilFinished();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  player.stop();
+  assert.equal(await old, false);
+  await player.enqueue(audioChunk());
+  let finished = false;
+  const current = player.waitUntilFinished().then(value => { finished = true; return value; });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  context.sources[0].onended();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(finished, false);
+  context.sources[1].onended();
+  assert.equal(await current, true);
+  await player.close();
+});
+
+test('playback completion includes a decode that has not finished yet', async () => {
+  const context = fakeContext();
+  let finishDecode;
+  context.decodeAudioData = () => new Promise(resolve => { finishDecode = resolve; });
+  const player = new AudioPlayer({contextFactory: () => context});
+  await player.unlock();
+  const decoding = player.enqueue({format: 'wav', data_base64: btoa('test')});
+  let finished = false;
+  const waiting = player.waitUntilFinished().then(value => { finished = true; return value; });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(finished, false);
+  finishDecode({duration: 1});
+  await decoding;
+  assert.equal(finished, false);
+  context.sources[0].onended();
+  assert.equal(await waiting, true);
+  await player.close();
+});
+
+test('after-read actions validate coordinates and scroll amounts', () => {
+  assert.equal(readActionOptions({type: 'none'}), null);
+  assert.deepEqual(readActionOptions({type: 'click', x: '90', y: '50'}), {type: 'click', x: 90, y: 50});
+  assert.deepEqual(readActionOptions({type: 'scroll', x: 50, y: 50, scrollX: -80, scrollY: 0}), {type: 'scroll', x: 50, y: 50, scrollX: -80, scrollY: 0});
+  for (const value of [-1, 101, NaN, Infinity, '', 'invalid']) assert.throws(() => readActionOptions({type: 'click', x: value, y: 50}));
+  assert.throws(() => readActionOptions({type: 'scroll', x: 50, y: 50, scrollX: 0, scrollY: 0}));
+  assert.throws(() => readActionOptions({type: 'scroll', x: 50, y: 50, scrollX: 0, scrollY: 201}));
+  assert.throws(() => readActionOptions({type: 'unknown', x: 50, y: 50}));
+});
+
+test('a cancelled job or replaced document cannot receive an automatic click', async () => {
+  const previous = globalThis.chrome;
+  try {
+    for (const reason of ['cancel', 'document']) {
+      let current = true, calls = 0;
+      globalThis.chrome = {scripting: {executeScript: async () => {
+        calls++;
+        if (reason === 'cancel') current = false;
+        return [{frameId: 0, documentId: reason === 'document' ? 'new-document' : 'old-document', result: []}];
+      }}};
+      assert.equal(await executePageAction({tabId: 1, documentId: 'old-document', action: {type: 'click', x: 50, y: 50}, isCurrent: () => current}), false);
+      assert.equal(calls, 1);
+    }
+  } finally { globalThis.chrome = previous; }
 });

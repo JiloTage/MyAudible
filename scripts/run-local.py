@@ -21,6 +21,22 @@ def port_number(value: str) -> int:
     return number
 
 
+def resolve_ocr_device(device: str) -> str:
+    if device == "cpu":
+        return "cpu"
+    try:
+        import torch
+    except ImportError as error:
+        if device == "cuda":
+            raise RuntimeError("PyTorch is missing. Run the Windows setup with the OCR dependencies first.") from error
+        return "cpu"
+    if torch.cuda.is_available():
+        return "cuda"
+    if device == "cuda":
+        raise RuntimeError("CUDA OCR was selected but PyTorch cannot access CUDA. Install compatible CUDA wheels or select CPU OCR.")
+    return "cpu"
+
+
 def require_free_port(port: int) -> None:
     with socket.socket() as probe:
         try:
@@ -85,7 +101,8 @@ def main() -> int:
     parser.add_argument("--speech", default="speech", help="speech.cpp v0.8.4 executable")
     parser.add_argument("--model", default="irodori-tts-mf")
     parser.add_argument("--speech-device", choices=("auto", "gpu", "cpu"), default="gpu")
-    parser.add_argument("--ocr-device", choices=("cpu", "cuda"), default="cpu")
+    parser.add_argument("--ocr-device", choices=("auto", "cpu", "cuda"), default="auto",
+                        help="Use CUDA when available, otherwise CPU")
     parser.add_argument("--speech-port", type=port_number, default=8081)
     parser.add_argument("--backend-port", type=port_number, default=8765)
     parser.add_argument("--quiet", action="store_true", help="Suppress child output for background startup")
@@ -103,19 +120,14 @@ def main() -> int:
         version = subprocess.run([args.speech, "--version"], capture_output=True, text=True, check=True).stdout.strip()
         if not version.startswith("speech.cpp 0.8.4,"):
             raise RuntimeError(f"Expected speech.cpp 0.8.4; executable reports {version!r}. Run setup again.")
-        if args.ocr_device == "cuda":
-            try:
-                import torch
-            except ImportError as error:
-                raise RuntimeError("PyTorch is missing. Run the Windows setup with the OCR dependencies first.") from error
-            if not torch.cuda.is_available():
-                raise RuntimeError("CUDA OCR was selected but PyTorch cannot access CUDA. Install compatible CUDA wheels or select CPU OCR.")
+        ocr_device = resolve_ocr_device(args.ocr_device)
         environment = os.environ.copy()
         environment["MYAUDIBLE_SPEECH_URL"] = f"http://127.0.0.1:{args.speech_port}"
-        environment["MYAUDIBLE_OCR_DEVICE"] = args.ocr_device
+        environment["MYAUDIBLE_OCR_DEVICE"] = ocr_device
         environment.setdefault("MYAUDIBLE_OCR_LITE", "1")
         environment["MYAUDIBLE_PORT"] = str(args.backend_port)
         print(f"Starting {version}; {args.model}, device {args.speech_device}.", flush=True)
+        print(f"YomiToku OCR device: {ocr_device}.", flush=True)
         print("The first GPU run can take a while to compile shaders. Press Ctrl+C to stop both servers.", flush=True)
         speech_child = launch([args.speech, "serve", args.model, "--host", "127.0.0.1", "--port", str(args.speech_port), "--device", args.speech_device], quiet=args.quiet)
         wait_for_speech(speech_child, environment["MYAUDIBLE_SPEECH_URL"])

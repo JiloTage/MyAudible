@@ -33,7 +33,10 @@
       sendMessage: async () => {},
       onActivated: events.activated, onUpdated: events.updated, onRemoved: events.removed,
     },
-    scripting: {executeScript: async options => {mock.executions.push(options); return [{result: undefined}];}},
+    scripting: {executeScript: async options => {
+      mock.executions.push({...options, func: options.func?.name});
+      return window.__executeFixtureScript({target: options.target, source: options.func?.toString(), args: options.args || []});
+    }},
     runtime: {onMessage: events.message, sendNativeMessage: async (host, message) => {
       mock.nativeCalls.push({host, message});
       if (mock.nativeError) throw new Error(mock.nativeError);
@@ -103,7 +106,8 @@
     createBufferSource() {
       const source = {playbackRate: {value: 1}, starts: 0, stops: 0, disconnects: 0,
         connect() {}, start(when) { this.starts++; this.when = when; },
-        stop() { this.stops++; }, disconnect() { this.disconnects++; }};
+        stop() { this.stops++; }, disconnect() { this.disconnects++; },
+        finish() { if (!this.ended) { this.ended = true; this.onended?.(); } }};
       mock.sources.push(source); return source;
     }
   }

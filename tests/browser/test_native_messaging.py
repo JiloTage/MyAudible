@@ -150,6 +150,52 @@ class NativeMessagingTest(unittest.IsolatedAsyncioTestCase):
                         }""")
                         await expect(page.locator("#transcript")).to_contain_text("読み取り", timeout=120000)
                         await expect(page.locator("#status")).to_have_text("生成完了。", timeout=120000)
+
+                        await page.locator("#stop").click()
+                        await reader.evaluate("""() => {
+                            document.body.innerHTML = '<p id="text">今日は晴れです。</p><button id="next">次へ</button>';
+                            document.querySelector('#next').style.cssText = 'position:fixed;left:80%;top:30%;width:15%;height:40%';
+                            window.nextClicks = 0;
+                            document.querySelector('#next').onclick = () => {
+                                window.nextClicks++;
+                                document.querySelector('#text').textContent = '明日は雨です。';
+                            };
+                        }""")
+                        await page.locator("#afterReadSettings > summary").click()
+                        await page.locator("#afterReadAction").select_option("click")
+                        await page.locator("#afterReadX").fill("90")
+                        await page.locator("#afterReadY").fill("50")
+                        await page.locator("#steps").fill("4")
+                        await page.locator("#startMonitor").click()
+                        await reader.bring_to_front()
+                        await reader.wait_for_function("window.nextClicks === 1", timeout=120000)
+                        self.assertEqual(await page.locator("#playback").text_content(), '')
+                        await expect(page.locator("#transcript")).to_contain_text("明日は", timeout=120000)
+                        await page.locator("#stop").click()
+
+                        await reader.evaluate("""url => {
+                            document.body.innerHTML = '';
+                            const frame = document.createElement('iframe'); frame.id = 'action-frame'; frame.src = url;
+                            frame.style.cssText = 'position:fixed;left:20%;top:20%;width:60%;height:50vh;border:0';
+                            document.body.append(frame);
+                        }""", f"http://localhost:{server.server_port}/action-frame.html")
+                        child = reader.locator("#action-frame").content_frame
+                        await child.locator("#next").wait_for()
+                        await reader.bring_to_front()
+                        results = await page.evaluate("""async () => {
+                            const {executePageAction} = await import('./lib/page-action.mjs');
+                            const [tab] = await chrome.tabs.query({active: true, currentWindow: true});
+                            const [document] = await chrome.scripting.executeScript({target: {tabId: tab.id}, func: () => true});
+                            const result = [];
+                            for (const [type, y] of [['click', 24], ['scroll', 43]]) result.push(await executePageAction({
+                                tabId: tab.id, documentId: document.documentId, isCurrent: () => true,
+                                action: {type, x: 50, y, scrollX: 0, scrollY: 50},
+                            }));
+                            return result;
+                        }""")
+                        self.assertEqual(results, [True, True])
+                        self.assertEqual(await child.locator("#next").evaluate("node => node.ownerDocument.defaultView.clicks"), 1)
+                        self.assertGreater(await child.locator("#scroller").evaluate("node => node.scrollTop"), 100)
                     finally:
                         server.shutdown()
                         server.server_close()

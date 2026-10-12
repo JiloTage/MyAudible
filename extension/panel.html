@@ -29,13 +29,30 @@
       </div>
       <p class="note">対象タブを前面にしたまま使用します。自動読み上げは約1.2秒ごとに画面を確認し、ページが静止してから読みます。</p>
       <p class="note">画面の読み取りにはサイトへのアクセス許可が必要です。権限エラーが出る場合はChromeの拡張機能管理からMyAudibleを再読み込みしてください。</p>
+      <details id="afterReadSettings">
+        <summary>読み上げ後の操作</summary>
+        <label>再生が終わったら<select id="afterReadAction"><option value="none">何もしない</option><option value="click">指定位置をクリック</option><option value="scroll">スクロール</option></select></label>
+        <div id="afterReadPosition" hidden>
+          <button id="pickActionPoint" type="button">画面から操作位置を選ぶ</button>
+          <div class="grid">
+            <label>左から (%)<input id="afterReadX" type="number" min="0" max="100" step="0.1" value="90"></label>
+            <label>上から (%)<input id="afterReadY" type="number" min="0" max="100" step="0.1" value="50"></label>
+          </div>
+          <p class="note">表示中のウェブページ内の位置です。スクロールでは、その位置の本文や枠を動かします。</p>
+        </div>
+        <div id="afterReadScroll" hidden>
+          <div class="grid">
+            <label>横の移動量 (%)<input id="afterReadScrollX" type="number" min="-200" max="200" step="5" value="0"></label>
+            <label>縦の移動量 (%)<input id="afterReadScrollY" type="number" min="-200" max="200" step="5" value="85"></label>
+          </div>
+          <p class="note">画面の幅・高さに対する移動量です。正の値は右・下、負の値は左・上へ動きます。</p>
+        </div>
+        <p class="note">自動読み上げで、最後まで再生したページに1回だけ操作します。画面が変わると次の読み上げを開始します。設定を変更すると待機中の操作を取り消し、次の読み上げから適用します。</p>
+        <p class="note">サイトによっては自動クリックを受け付けない場合があります。</p>
+      </details>
       <details>
         <summary>読み取り範囲・ページ検出</summary>
         <button id="preview" type="button">画面を表示して範囲を選ぶ</button>
-        <div id="previewBox" hidden>
-          <canvas id="previewCanvas" aria-label="ドラッグして読み取り範囲を選択"></canvas>
-          <button id="closePreview" type="button">プレビューを消す</button>
-        </div>
         <p class="note">本文だけを囲みます。U-NEXTの操作バー・時刻・カーソルを範囲から外してください。</p>
         <div class="grid">
           <label>左 (%)<input id="cropX" type="number" min="0" max="95" step="0.1" value="5"></label>
@@ -48,6 +65,11 @@
         </div>
         <p class="note">似たページを検出しない場合は、しきい値を下げます。小さな画面変化で誤検出する場合は上げます。</p>
       </details>
+      <div id="previewBox" hidden>
+        <p id="previewHelp" class="note">ドラッグして読み取り範囲を選んでください。</p>
+        <canvas id="previewCanvas" aria-label="ドラッグして読み取り範囲を選択"></canvas>
+        <button id="closePreview" type="button">プレビューを消す</button>
+      </div>
     </section>
 
     <section aria-label="テキスト読み上げ">

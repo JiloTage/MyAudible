@@ -77,16 +77,49 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         panel = await self.context.new_page()
         await panel.set_viewport_size({"width": 390, "height": 900})
         await panel.expose_function("__captureVisibleFixture", self.data_url)
+        await panel.expose_function("__executeFixtureScript", self.execute_fixture_script)
         await panel.add_init_script(path=Path(__file__).parent / "chrome_stub.js")
         await panel.goto(self.origin + "/extension/panel.html")
         await panel.wait_for_function("document.querySelector('#health').textContent.includes('準備OK')", timeout=5000)
         await panel.wait_for_function("__mock.fetches.some(request => request.path === '/v1/voices')", timeout=5000)
         return panel
 
+    async def execute_fixture_script(self, options):
+        results = []
+        for index, frame in enumerate(self.page.frames):
+            document_id = f"fixture-{index}"
+            target = options["target"]
+            if target.get("documentIds") and document_id not in target["documentIds"]:
+                continue
+            if not target.get("allFrames") and not target.get("documentIds") and index:
+                continue
+            result = await frame.evaluate("""({source, args}) => source ? (0, eval)('(' + source + ')')(...args) : null""",
+                                          {"source": options.get("source"), "args": options.get("args", [])})
+            results.append({"frameId": index, "documentId": document_id, "result": result})
+        return results
+
     async def request(self, panel, count=1):
         await panel.wait_for_function("""count => __backend.frames.filter(frame => frame.type === 'synthesize').length >= count""",
                                       arg=count, timeout=15000)
         return await panel.evaluate("""count => __backend.frames.filter(frame => frame.type === 'synthesize')[count - 1]""", count)
+
+    async def configure_action(self, panel, action="click", x=85, y=45, scroll_y=85):
+        await panel.locator("#afterReadSettings > summary").click()
+        await panel.locator("#afterReadAction").select_option(action)
+        await panel.locator("#afterReadX").fill(str(x))
+        await panel.locator("#afterReadY").fill(str(y))
+        if action == "scroll":
+            await panel.locator("#afterReadScrollY").fill(str(scroll_y))
+
+    async def complete_audio(self, panel, request_id, chunks=1):
+        await panel.evaluate("""({id, chunks}) => {
+            for (let index = 0; index < chunks; index++) __backend.emit(id, 'audio.chunk', {
+                index, format: 'pcm_s16le', sample_rate: 48000, channels: 1,
+                data_base64: btoa(String.fromCharCode(0).repeat(96000)),
+            });
+            __backend.emit(id, 'completed');
+        }""", {"id": request_id, "chunks": chunks})
+        await panel.wait_for_function("count => __mock.sources.length >= count && __mock.sources.at(-1).starts === 1", arg=chunks)
 
     async def test_same_url_single_glyph_repaint_at_default_sensitivity(self):
         initial_url = self.page.url
@@ -435,6 +468,169 @@ class BrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await panel.evaluate("__mock.sources[0].playbackRate.value"), 1)
         await panel.reload()
         await panel.wait_for_function("document.querySelector('#rate').value === '1.5'")
+
+    async def test_actual_audio_completion_waits_for_playback(self):
+        result = await self.page.evaluate("""async () => {
+            const {AudioPlayer} = await import('/extension/lib/audio.mjs');
+            const player = new AudioPlayer();
+            await player.unlock();
+            const chunk = {format: 'pcm_s16le', sample_rate: 48000, channels: 1,
+                data_base64: btoa(String.fromCharCode(0).repeat(9600))};
+            await player.enqueue(chunk); await player.enqueue(chunk);
+            const start = performance.now();
+            const finished = await player.waitUntilFinished();
+            const result = {finished, elapsed: performance.now() - start, sources: player.sources.size};
+            await player.close(); return result;
+        }""")
+        self.assertTrue(result["finished"], result)
+        self.assertGreater(result["elapsed"], 150, result)
+        self.assertEqual(result["sources"], 0, result)
+
+    async def test_auto_click_waits_for_all_audio_then_reads_the_changed_page_once(self):
+        panel = await self.open_panel()
+        await self.configure_action(panel)
+        await panel.locator("#startMonitor").click()
+        await self.page.bring_to_front()
+        request = await self.request(panel)
+        await self.complete_audio(panel, request["id"], chunks=2)
+        await panel.evaluate("id => __backend.emit(id, 'completed')", request["id"])
+        await panel.wait_for_timeout(1400)
+        self.assertEqual(await self.page.evaluate("readerFixture.page()"), 1)
+        await panel.evaluate("__mock.sources[0].finish()")
+        await panel.wait_for_timeout(1400)
+        self.assertEqual(await self.page.evaluate("readerFixture.page()"), 1)
+        await panel.evaluate("__mock.sources[1].finish()")
+        await self.page.wait_for_function("readerFixture.page() === 2", timeout=6000)
+        next_request = await self.request(panel, 2)
+        self.assertNotEqual(next_request["id"], request["id"])
+        await panel.evaluate("id => __backend.emit(id, 'completed')", request["id"])
+        await panel.wait_for_timeout(1400)
+        self.assertEqual(await self.page.evaluate("readerFixture.page()"), 2)
+        self.assertEqual(await panel.evaluate("__mock.executions.filter(item => item.func === 'actAtPoint').length"), 1)
+        await panel.locator("#stop").click()
+
+    async def test_auto_actions_are_cancelled_by_stop_focus_page_error_and_settings_changes(self):
+        for reason in ("stop", "tab", "window", "page", "error", "cancelled", "settings", "close"):
+            with self.subTest(reason=reason):
+                await self.page.evaluate("readerFixture.goTo(1)")
+                panel = await self.open_panel()
+                await self.configure_action(panel)
+                await panel.locator("#startMonitor").click()
+                await self.page.bring_to_front()
+                request = await self.request(panel)
+                await self.complete_audio(panel, request["id"])
+                if reason == "stop":
+                    await panel.locator("#stop").click()
+                elif reason == "tab":
+                    await panel.evaluate("__mock.activate(9)")
+                elif reason == "window":
+                    await panel.evaluate("__mock.focusWindow(3)")
+                elif reason == "page":
+                    await self.page.evaluate("readerFixture.goTo(2)")
+                elif reason == "error":
+                    await panel.evaluate("id => __backend.emit(id, 'error', {message: 'test error'})", request["id"])
+                elif reason == "cancelled":
+                    await panel.evaluate("id => __backend.emit(id, 'cancelled')", request["id"])
+                elif reason == "settings":
+                    await panel.locator("#afterReadAction").select_option("none")
+                else:
+                    await panel.evaluate("dispatchEvent(new PageTransitionEvent('pagehide'))")
+                await panel.evaluate("__mock.sources[0].finish()")
+                await panel.wait_for_timeout(1600)
+                self.assertEqual(await panel.evaluate("__mock.executions.filter(item => item.func === 'actAtPoint').length"), 0, reason)
+                self.assertEqual(await self.page.evaluate("readerFixture.page()"), 2 if reason == "page" else 1, reason)
+                await panel.close()
+
+    async def test_auto_scroll_moves_the_window_or_the_container_at_the_selected_point(self):
+        for container in (False, True):
+            with self.subTest(container=container):
+                await self.page.evaluate("""container => {
+                    document.querySelector('#scroll-test')?.remove(); window.scrollTo(0, 0);
+                    const box = document.createElement('div'); box.id = 'scroll-test';
+                    box.style.cssText = container ? 'position:fixed;left:400px;top:150px;width:400px;height:400px;overflow:auto;background:white'
+                                                  : 'height:2400px';
+                    box.innerHTML = '<div style="height:2400px;background:linear-gradient(white,black)">スクロール本文</div>';
+                    document.body.append(box);
+                }""", container)
+                panel = await self.open_panel()
+                await self.configure_action(panel, "scroll", x=50 if container else 95, y=50, scroll_y=50)
+                await panel.locator("#startMonitor").click()
+                await self.page.bring_to_front()
+                request = await self.request(panel)
+                await self.complete_audio(panel, request["id"])
+                self.assertEqual(await self.page.evaluate("window.scrollY + document.querySelector('#scroll-test').scrollTop"), 0)
+                await panel.evaluate("__mock.sources[0].finish()")
+                await self.page.wait_for_function("window.scrollY + document.querySelector('#scroll-test').scrollTop > 100", timeout=6000)
+                if container:
+                    self.assertEqual(await self.page.evaluate("window.scrollY"), 0)
+                else:
+                    self.assertEqual(await self.page.evaluate("document.querySelector('#scroll-test').scrollTop"), 0)
+                await panel.locator("#stop").click()
+                await panel.close()
+
+    async def test_actions_reach_cross_origin_frames_and_coordinates_are_picked_and_restored(self):
+        await self.page.evaluate("""url => {
+            const frame = document.createElement('iframe'); frame.id = 'action-frame';
+            frame.src = url; frame.style.cssText = 'position:fixed;left:400px;top:100px;width:350px;height:250px;border:0';
+            document.body.append(frame);
+        }""", self.origin.replace("127.0.0.1", "localhost") + "/tests/browser/fixtures/action-frame.html")
+        await self.page.locator("#action-frame").content_frame.locator("#next").wait_for()
+        panel = await self.open_panel()
+        await self.configure_action(panel)
+        await panel.locator("#pickActionPoint").click()
+        await panel.locator("#previewCanvas").wait_for(state="visible")
+        canvas = await panel.locator("#previewCanvas").evaluate("node => ({width: node.clientWidth, height: node.clientHeight})")
+        await panel.locator("#previewCanvas").click(position={"x": canvas["width"] * 575 / 1200, "y": canvas["height"] * 150 / 820})
+        self.assertAlmostEqual(float(await panel.locator("#afterReadX").input_value()), 47.9, delta=.3)
+        self.assertAlmostEqual(float(await panel.locator("#afterReadY").input_value()), 18.3, delta=.3)
+        frame = self.page.frames[-1]
+        self.assertEqual(await frame.evaluate("window.clicks"), 0)
+        ARTIFACTS.mkdir(parents=True, exist_ok=True)
+        await panel.screenshot(path=str(ARTIFACTS / "after-read-action.png"), full_page=True)
+        await panel.reload()
+        await panel.wait_for_function("document.querySelector('#afterReadAction').value === 'click'")
+        self.assertAlmostEqual(float(await panel.locator("#afterReadX").input_value()), 47.9, delta=.3)
+        await self.page.bring_to_front()
+        for action, y in (("click", 150), ("scroll", 250)):
+            performed = await panel.evaluate("""async ({type, y}) => {
+                const {executePageAction} = await import('/extension/lib/page-action.mjs');
+                return executePageAction({tabId: 1, documentId: 'fixture-0', isCurrent: () => true,
+                    action: {type, x: 575 / 1200 * 100, y: y / 820 * 100, scrollX: 0, scrollY: 50}});
+            }""", {"type": action, "y": y})
+            self.assertTrue(performed)
+        self.assertEqual(await frame.evaluate("window.clicks"), 1)
+        self.assertGreater(await frame.locator("#scroller").evaluate("node => node.scrollTop"), 100)
+
+    async def test_manual_read_does_not_advance_even_when_the_action_is_enabled(self):
+        panel = await self.open_panel()
+        await self.configure_action(panel)
+        await panel.locator("#readOnce").click()
+        request = await self.request(panel)
+        await self.complete_audio(panel, request["id"])
+        await panel.evaluate("__mock.sources[0].finish()")
+        await panel.wait_for_timeout(1400)
+        self.assertEqual(await self.page.evaluate("readerFixture.page()"), 1)
+        self.assertEqual(await panel.evaluate("__mock.executions.filter(item => item.func === 'actAtPoint').length"), 0)
+
+    async def test_a_click_without_a_page_change_does_not_repeat_or_reread(self):
+        await self.page.evaluate("""() => {
+            const button = document.createElement('button'); button.id = 'no-change'; button.textContent = '次へ';
+            button.style.cssText = 'position:fixed;left:80%;top:35%;width:15%;height:30%';
+            window.actionClicks = 0; button.onclick = () => { window.actionClicks++; };
+            document.body.append(button);
+        }""")
+        panel = await self.open_panel()
+        await self.configure_action(panel)
+        await panel.locator("#startMonitor").click()
+        await self.page.bring_to_front()
+        request = await self.request(panel)
+        await self.complete_audio(panel, request["id"])
+        await panel.evaluate("__mock.sources[0].finish()")
+        await self.page.wait_for_function("window.actionClicks === 1", timeout=6000)
+        await panel.wait_for_timeout(2800)
+        self.assertEqual(await self.page.evaluate("window.actionClicks"), 1)
+        self.assertEqual(await panel.evaluate("__backend.frames.filter(frame => frame.type === 'synthesize').length"), 1)
+        await panel.locator("#stop").click()
 
 
 if __name__ == "__main__":

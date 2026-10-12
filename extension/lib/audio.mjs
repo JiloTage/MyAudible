@@ -11,6 +11,7 @@ export class AudioPlayer {
     this.decodeQueue = Promise.resolve();
     this.maxAheadSeconds = maxAheadSeconds;
     this.waiters = new Set();
+    this.endWaiters = new Set();
     this.queuedEncodedBytes = 0;
   }
   async unlock() {
@@ -20,6 +21,8 @@ export class AudioPlayer {
   }
   stop() {
     this.generation++;
+    for (const resolve of this.endWaiters) resolve(false);
+    this.endWaiters.clear();
     for (const cancel of this.waiters) cancel();
     this.waiters.clear();
     for (const source of this.sources) {
@@ -31,6 +34,13 @@ export class AudioPlayer {
     this.decodeQueue = Promise.resolve();
     this.queuedEncodedBytes = 0;
     this.onState('stopped');
+  }
+  async waitUntilFinished() {
+    const generation = this.generation;
+    await this.decodeQueue;
+    if (generation !== this.generation) return false;
+    if (!this.sources.size) return true;
+    return new Promise(resolve => this.endWaiters.add(resolve));
   }
   waitForCapacity(generation) {
     if (generation !== this.generation) return Promise.resolve(false);
@@ -81,9 +91,14 @@ export class AudioPlayer {
       this.nextAt = when + buffer.duration;
       this.sources.add(source);
       source.onended = () => {
+        if (generation !== this.generation) return;
         this.sources.delete(source);
         source.disconnect();
-        if (!this.sources.size) this.onState('idle');
+        if (!this.sources.size) {
+          for (const resolve of this.endWaiters) resolve(true);
+          this.endWaiters.clear();
+          this.onState('idle');
+        }
       };
       source.start(when);
       this.onState('playing');

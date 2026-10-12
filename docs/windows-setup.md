@@ -1,6 +1,6 @@
 # Windows で起動する
 
-Windows 10/11 x64、Chrome、Python **3.11 x64**、NVIDIA の最新 GPU ドライバーを用意する。speech.cpp はドライバーの Vulkan を使うので CUDA Toolkit のインストールは不要。OCR は最初は CPU で実行する。
+Windows 10/11 x64、Chrome、Python **3.11 x64**、NVIDIA の最新 GPU ドライバーを用意する。speech.cpp はドライバーの Vulkan を使うので CUDA Toolkit のインストールは不要。YomiTokuのOCRはCUDAが利用できればGPU、それ以外ではCPUを自動選択する。基本セットアップはCPU版PyTorchを導入するため、GPUでOCRも行う場合は後述のCUDA版への切り替えを行う。
 
 ## 1. セットアップ
 
@@ -32,7 +32,7 @@ Python Launcher `py` がない場合は、Python 3.11 の実行ファイルを�
 
 Chrome の `chrome://extensions` でデベロッパーモードを有効化し「パッケージ化されていない拡張機能を読み込む」からリポジトリ内の `extension` フォルダーを選ぶ。ツールバーの MyAudible をクリックしてサイドバーを開き、**「サーバーを起動して接続」** を押す。起動完了後に接続先とトークンを自動保存し、参照音声を更新する。既に同じトークンのバックエンドが起動済みなら、新しいプロセスを作らず接続する。
 
-拡張機能からはセットアップ時に選んだモデルをGPUで起動し、OCRはCPUを使う。接続先は `127.0.0.1:8765`、speech.cpp は `127.0.0.1:8081`。起動中はボタンを無効化する。ポート競合や起動失敗はサイドバーに表示する。モデル未準備などの詳細は手動起動で確認できる。
+拡張機能からはセットアップ時に選んだモデルをGPUで起動し、OCRはCUDAの利用可否でGPU/CPUを自動選択する。接続先は `127.0.0.1:8765`、speech.cpp は `127.0.0.1:8081`。起動中はボタンを無効化する。ポート競合や起動失敗はサイドバーに表示する。モデル未準備などの詳細は手動起動で確認できる。
 
 ボタン起動のサーバーはバックグラウンドで動き、サイドバーやChromeを閉じても常駐する。サイドバーの「停止」は読み上げだけを停止する。サーバーの終了はPCの再起動、またはタスクマネージャーでこのリポジトリの `scripts/run-local.py` を実行するPythonプロセスと、その子のspeech.exe / Pythonを終了する。起動に失敗した場合はランチャーが自分で起動したプロセスだけを終了する。
 
@@ -60,14 +60,15 @@ speech.cpp が `127.0.0.1:8081`、MyAudible バックエンドが `127.0.0.1:876
 
 ## GPU で OCR も実行する場合
 
-CPU OCR が遅い場合は、CUDA 12.8 対応ドライバーと十分な VRAM のある PC で次を実行する。speech.cpp は引き続き Vulkan、Yomitoku の PyTorch は CUDA を使用する。以下の PyTorch/torchvision Windows Python 3.11 wheel の組合せを確認済み。
+対応するNVIDIAドライバーと十分なVRAMのあるPCでは、起動済みのMyAudibleサーバーを終了してから、リポジトリの仮想環境をCUDA版PyTorchへ切り替える。speech.cppはVulkan、YomiTokuはCUDAを使用する。以下は[PyTorch公式の2.6.0対応表](https://pytorch.org/get-started/previous-versions/#v260)にあるCUDA 12.4の組合せで、CPU版がインストール済みでもCUDA版へ置き換える。
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-windows.ps1 -TorchIndexUrl https://download.pytorch.org/whl/cu128 -TorchVersion 2.7.1 -TorchVisionVersion 0.22.1
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-windows.ps1 -OcrDevice cuda
+.\.venv\Scripts\python.exe -m pip install 'torch==2.6.0+cu124' 'torchvision==0.21.0+cu124' --index-url https://download.pytorch.org/whl/cu124
+.\.venv\Scripts\python.exe -m pip check
+.\.venv\Scripts\python.exe -c 'import torch; print(torch.__version__, torch.cuda.is_available())'
 ```
 
-GPU の世代、ドライバー、Windows 環境に合わせて PyTorch の公式対応表を確認する。インデックスとバージョンは setup のパラメータで変更可能。CUDA の利用可否はランチャーでも検査する。TTS と OCR は同じ GPU の VRAM を使うため、不足する場合は `-OcrDevice cpu` に戻す。
+CUDAの確認結果が `True` なら、拡張機能の「サーバーを起動して接続」でGPU OCRが選ばれる。手動起動も既定は `-OcrDevice auto`。GPUを明示する場合は `scripts\run-windows.ps1 -OcrDevice cuda` とし、CUDAが利用できなければ起動時にエラーを表示する。TTSとOCRは同じGPUのVRAMを使うため、不足する場合はサーバーを終了し、`scripts\run-windows.ps1 -OcrDevice cpu` で起動する。CUDA Toolkitを別途インストールする必要はない。
 
 ## 選択肢とトラブル対応
 
@@ -104,4 +105,4 @@ $env:MYAUDIBLE_OCR_LITE = '1'
 .\.venv\Scripts\python.exe -m myaudible
 ```
 
-手動起動では終了時に両方のコンソールで Ctrl+C を押す。API、モデル上の制限、ライセンスは [upstream-notes.md](upstream-notes.md)、U-NEXT の検証手順はリポジトリの README を参照。
+手動起動では終了時に両方のコンソールで Ctrl+C を押す。API、モデル上の制限、ライセンスは [upstream-notes.md](upstream-notes.md) を参照。
