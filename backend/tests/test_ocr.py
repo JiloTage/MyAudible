@@ -6,14 +6,20 @@ import threading
 import unittest
 from unittest.mock import MagicMock, patch
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
-from myaudible.ocr import InvalidImage, OCRService, OCRUnavailable, _extract_text
+from myaudible.ocr import (
+    InvalidImage, OCRService, OCRUnavailable, _decode_image, _extract_text,
+    _guard_analyzer, _has_region_contrast, _is_reliable_word,
+)
 
 
-def image_bytes(format="PNG", size=(32, 24), color=(11, 22, 33)):
+def image_bytes(format="PNG", size=(32, 24), color=(11, 22, 33), blank=False):
     output = BytesIO()
-    Image.new("RGB", size, color).save(output, format=format)
+    image = Image.new("RGB", size, color)
+    if not blank:
+        ImageDraw.Draw(image).rectangle((8, 8, 12, 12), fill="white")
+    image.save(output, format=format)
     return output.getvalue()
 
 
@@ -28,6 +34,54 @@ def word(text, box, direction="vertical"):
 
 
 class OCRTests(unittest.TestCase):
+    def test_blank_images_return_no_text_without_loading_models(self):
+        with patch("myaudible.ocr.importlib.import_module") as importer:
+            for color in ("white", "black", (11, 22, 33)):
+                with self.subTest(color=color):
+                    self.assertEqual(OCRService().recognize(image_bytes(color=color, blank=True)), "")
+        importer.assert_not_called()
+
+    def test_blank_detections_are_removed_before_recognition_with_scores_aligned(self):
+        image = _decode_image(image_bytes())
+        empty = [[0, 0], [4, 0], [4, 24], [0, 24]]
+        printed = [[7, 7], [14, 7], [14, 14], [7, 14]]
+        detector = MagicMock(return_value=(SimpleNamespace(points=[empty, printed], scores=[0.99, 0.8]), None))
+        analyzer = SimpleNamespace(text_detector=detector, aggregate=lambda ocr, _layout: ocr)
+        _guard_analyzer(analyzer)
+        result, visualization = analyzer.text_detector(image)
+        self.assertEqual(result.points, [printed])
+        self.assertEqual(result.scores, [0.8])
+        self.assertIsNone(visualization)
+        detector.assert_called_once_with(image)
+
+    def test_outside_image_regions_do_not_wrap_around_to_visible_text(self):
+        image = _decode_image(image_bytes())
+        for points in (
+            [[-20, -20], [-2, -20], [-2, -2], [-20, -2]],
+            [[35, 0], [50, 0], [50, 24], [35, 24]],
+        ):
+            with self.subTest(points=points):
+                self.assertFalse(_has_region_contrast(image, points))
+        self.assertTrue(_has_region_contrast(image, [[-2, -2], [14, -2], [14, 14], [-2, 14]]))
+
+    def test_confidence_uses_per_character_average_and_preserves_genuine_repetitions(self):
+        for text in ("短文", "長い文章" * 20, "2018年12月" * 4, "ことが、ことが、ことが"):
+            with self.subTest(text=text):
+                self.assertTrue(_is_reliable_word(SimpleNamespace(content=text, rec_score=0.9 ** (len(text) + 1))))
+        self.assertFalse(_is_reliable_word(SimpleNamespace(
+            content="こから、ことが、ことが、ことに", rec_score=7.161755455169228e-13)))
+
+    def test_low_or_invalid_confidence_is_removed_before_layout_assembly(self):
+        valid = SimpleNamespace(content="本文", rec_score=0.9)
+        invalid = [SimpleNamespace(content="誤生成", rec_score=score)
+                   for score in (0, 1e-10, float("nan"), float("inf"), -1, 2, None)]
+        aggregate = MagicMock(side_effect=lambda ocr, _layout: ocr)
+        analyzer = SimpleNamespace(text_detector=MagicMock(), aggregate=aggregate)
+        _guard_analyzer(analyzer)
+        output = analyzer.aggregate(SimpleNamespace(words=[valid, *invalid]), object())
+        self.assertEqual(output.words, [valid])
+        self.assertEqual(aggregate.call_args.args[0].words, [valid])
+
     def test_supported_image_decode_and_real_analyzer_contract(self):
         for format in ("PNG", "JPEG", "WEBP"):
             with self.subTest(format=format):
@@ -109,6 +163,17 @@ class OCRTests(unittest.TestCase):
         with patch("myaudible.ocr.importlib.import_module", side_effect=ImportError("missing")):
             with self.assertRaises(OCRUnavailable):
                 OCRService().recognize(image_bytes())
+
+    def test_guard_install_failure_does_not_cache_an_unguarded_model(self):
+        module = SimpleNamespace(DocumentAnalyzer=MagicMock())
+        service = OCRService()
+        with patch("myaudible.ocr._guard_analyzer", side_effect=RuntimeError("unsupported analyzer")), \
+             patch("myaudible.ocr.importlib.import_module", return_value=module):
+            for _ in range(2):
+                with self.assertRaises(OCRUnavailable):
+                    service.recognize(image_bytes())
+                self.assertIsNone(service._analyzer)
+        self.assertEqual(module.DocumentAnalyzer.call_count, 2)
 
     def test_releases_last_image_even_if_inference_fails(self):
         analyzer = MagicMock(side_effect=RuntimeError("inference failed"))

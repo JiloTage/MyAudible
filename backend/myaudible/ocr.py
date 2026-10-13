@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+from functools import wraps
 from io import BytesIO
+import math
 import threading
 from typing import Any
 import warnings
@@ -17,6 +19,8 @@ MAX_IMAGE_PIXELS = 20_000_000
 MIN_IMAGE_DIMENSION = 16
 ALLOWED_IMAGE_FORMATS = frozenset({"PNG", "JPEG", "WEBP"})
 READING_ORDERS = {"auto": "auto", "vertical": "right2left", "horizontal": "top2bottom"}
+MIN_REGION_CONTRAST = 8
+MIN_CHARACTER_CONFIDENCE = 0.5
 
 
 class InvalidImage(ValueError):
@@ -64,6 +68,55 @@ def _decode_image(image_bytes: bytes) -> Any:
 
 def _get(item: Any, name: str, default: Any = None) -> Any:
     return item.get(name, default) if isinstance(item, dict) else getattr(item, name, default)
+
+
+def _has_contrast(image: Any) -> bool:
+    return bool(image.size) and any(
+        int(image[..., channel].max()) - int(image[..., channel].min()) >= MIN_REGION_CONTRAST
+        for channel in range(3)
+    )
+
+
+def _has_region_contrast(image: Any, points: Any) -> bool:
+    height, width = image.shape[:2]
+    x1 = max(0, math.floor(min(point[0] for point in points)))
+    y1 = max(0, math.floor(min(point[1] for point in points)))
+    x2 = min(width, math.ceil(max(point[0] for point in points)))
+    y2 = min(height, math.ceil(max(point[1] for point in points)))
+    return x1 < x2 and y1 < y2 and _has_contrast(image[y1:y2, x1:x2])
+
+
+def _is_reliable_word(word: Any) -> bool:
+    text = _get(word, "content", "")
+    score = _get(word, "rec_score")
+    if not isinstance(text, str) or not text.strip():
+        return False
+    if not isinstance(score, (int, float)) or not math.isfinite(score) or not 0 < score <= 1:
+        return False
+    # YomiToku multiplies token probabilities, including EOS; raw scores penalize long lines.
+    return score ** (1 / (len(text) + 1)) >= MIN_CHARACTER_CONFIDENCE
+
+
+def _guard_analyzer(analyzer: Any) -> None:
+    detector = analyzer.text_detector
+    aggregate = analyzer.aggregate
+
+    @wraps(detector)
+    def detect(image, *args, **kwargs):
+        result, visualization = detector(image, *args, **kwargs)
+        kept = [i for i, points in enumerate(result.points) if _has_region_contrast(image, points)]
+        result.points = [result.points[i] for i in kept]
+        result.scores = [result.scores[i] for i in kept]
+        return result, visualization
+
+    @wraps(aggregate)
+    def aggregate_reliable_words(ocr_result, layout_result):
+        # Filter before paragraph/table assembly, where recognition scores are discarded.
+        ocr_result.words = [word for word in ocr_result.words if _is_reliable_word(word)]
+        return aggregate(ocr_result, layout_result)
+
+    analyzer.text_detector = detect
+    analyzer.aggregate = aggregate_reliable_words
 
 
 def _contents(item: Any) -> str:
@@ -215,10 +268,12 @@ class OCRService:
                         "dynamic_width": True,
                         "batch_bucketing": True,
                     }}}
-                self._analyzer = yomitoku.DocumentAnalyzer(
+                analyzer = yomitoku.DocumentAnalyzer(
                     configs=configs, device=self.device, visualize=False,
                     ignore_meta=True, ignore_ruby=True, reading_order="auto",
                 )
+                _guard_analyzer(analyzer)
+                self._analyzer = analyzer
             except Exception as exc:
                 raise OCRUnavailable(
                     "YomiToku を初期化できません。OCR 依存パッケージ、モデル、GPU 設定を確認してください。"
@@ -229,6 +284,8 @@ class OCRService:
         if reading_order not in READING_ORDERS:
             raise ValueError("reading_order must be auto, vertical, or horizontal")
         image = _decode_image(image_bytes)
+        if not _has_contrast(image):
+            return ""
         with self._lock:
             analyzer = self._load_analyzer()
             analyzer.reading_order = READING_ORDERS[reading_order]

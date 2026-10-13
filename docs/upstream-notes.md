@@ -114,6 +114,8 @@ text = "\n".join(paragraph.contents for paragraph in result.paragraphs if paragr
 
 `DocumentAnalyzer` は OCR とレイアウト・読み順解析を実行する。`result.paragraphs` は `order` に沿って整列済み。各段落のテキストは `contents`。縦書きは方向を判定し右から左へ段落を読む。`OCR` 単体の `words` を画面上の y 座標だけで整列すると、縦書きの読書ページで誤順になり得る。`ignore_ruby=True` は本文とふりがなの二重読みを減らす。
 
+MyAudibleは画像全体と検出領域の画素値の変化を確認し、各色チャンネルの最大値と最小値の差がすべて8未満の領域を文字認識から除外する。認識後は段落・図表・表セルを組み立てる前に、不確かな `words` を除外する。YomiTokuの `rec_score` は各トークンと終端記号の確率の積なので、`rec_score ** (1 / (len(content) + 1))` により文字あたりに換算し、0.5未満を除外する。長い行の生のスコアが小さくなる性質を考慮し、本文に実際にある単語や日付の繰り返しは保持する。画像と認識結果の保存は行わない。
+
 CPU 軽量モードは `configs` の `ocr.text_recognizer` に `model_name="parseq-tiny-dynw-v4"`、`dynamic_width=True`、`batch_bucketing=True` を指定する。`ocr.text_detector.infer_onnx=True` で CPU 検出を軽量化できる。CUDA 推論には CUDA 対応 PyTorch が必要。`DocumentAnalyzer.__call__` は内部で `asyncio.run` を呼び出し、`self.img` を書き換えるため、非同期 HTTP/WebSocket ハンドラからは専用スレッドで呼び出し、同一インスタンスへの並行実行を防ぐ。
 
 OCR のモデル重みは初回使用時に Hugging Face からダウンロードされる。以降の画像やテキスト、生成音声はクラウドへ送信されない。上流の推奨は画像短辺 720 px 以上。読書ページの撮影領域が狭すぎたり解像度が低い場合は読み取り精度が落ちる。ルビ・見開き・漫画の吹出しの順序は必ず実際のページで確認する。
